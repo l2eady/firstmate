@@ -169,7 +169,9 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  # Invalid candidates now stay in the bounded poll instead of aborting on the
+  # first transient path, so shadow sleep to keep timeout cases deterministic.
+  fm_fake_exit0 "$fakebin" treehouse sleep
   printf '%s\n' "$fakebin"
 }
 
@@ -198,13 +200,13 @@ test_spawn_isolation_abort() {
   # Abort: the pane resolves to a plain non-git directory (not a worktree at all).
   out=$(run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort"
-  assert_contains "$out" "did not yield an isolated worktree" "non-worktree spawn lacked the isolation error"
+  assert_contains "$out" "did not enter a worktree within 60s" "non-worktree spawn lacked the bounded-timeout error"
   assert_absent "$home/state/abort-notgit-dd4.meta" "aborted spawn must not record meta"
 
   # Abort: the pane resolves INTO the primary checkout (a subdir of PROJ_ABS).
   out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn landing inside the primary checkout should abort"
-  assert_contains "$out" "did not yield an isolated worktree" "primary-checkout spawn lacked the isolation error"
+  assert_contains "$out" "did not enter a worktree within 60s" "primary-checkout spawn lacked the bounded-timeout error"
 
   # Proceed: the pane resolves to a genuine, isolated worktree.
   out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
@@ -212,6 +214,119 @@ test_spawn_isolation_abort() {
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
+}
+
+# A sequencing fake tmux returns one pane cwd per poll, then repeats the last
+# value when the sequence is exhausted.
+# It records both the observed cwd values and every tmux command so the test can
+# prove the harness launch happens only after the requested project's worktree.
+make_spawn_sequence_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
+case "$*" in
+  *"#{pane_current_path}"*)
+    count=$(cat "${FM_FAKE_PANE_COUNTER:?}" 2>/dev/null || printf '0')
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_FAKE_PANE_COUNTER"
+    path=$(sed -n "${count}p" "${FM_FAKE_PANE_SEQUENCE:?}")
+    [ -n "$path" ] || path=$(tail -n 1 "$FM_FAKE_PANE_SEQUENCE")
+    printf '%s\n' "$path" >> "${FM_FAKE_PANE_READS:?}"
+    [ -n "${FM_TMUX_REC:-}" ] && printf 'cwd %s\n' "$path" >> "$FM_TMUX_REC"
+    printf '%s\n' "$path"
+    exit 0
+    ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  new-window) printf '@spawnwid\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|send-keys|set-window-option) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse sleep
+  printf '%s\n' "$fakebin"
+}
+
+run_spawn_sequence() {
+  local home=$1 id=$2 proj=$3 fakebin=$4 sequence=$5 counter=$6 reads=$7 rec=$8
+  mkdir -p "$home/data/$id"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  printf '0\n' > "$counter"
+  : > "$reads"
+  : > "$rec"
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_SEQUENCE="$sequence" \
+    FM_FAKE_PANE_COUNTER="$counter" FM_FAKE_PANE_READS="$reads" \
+    FM_TMUX_REC="$rec" TMUX="fake,1,0" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude 2>&1
+}
+
+test_spawn_ignores_transient_unrelated_paths() {
+  local home proj wt nongit unrelated fakebin sequence counter reads rec out status meta
+  local last_cwd_line launch_line
+  home="$TMP_ROOT/spawn-sequence-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-sequence-proj")
+  wt="$TMP_ROOT/spawn-sequence-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  nongit="$TMP_ROOT/spawn-sequence-notgit"
+  mkdir -p "$nongit"
+  unrelated=$(make_repo "$TMP_ROOT/spawn-sequence-unrelated")
+  fakebin=$(make_spawn_sequence_fakebin "$TMP_ROOT/spawn-sequence-fake")
+  sequence="$TMP_ROOT/spawn-sequence.paths"
+  counter="$TMP_ROOT/spawn-sequence.count"
+  reads="$TMP_ROOT/spawn-sequence.reads"
+  rec="$TMP_ROOT/spawn-sequence.tmux"
+  printf '%s\n' "$proj" "$nongit" "$unrelated" "$wt" > "$sequence"
+
+  out=$(run_spawn_sequence "$home" transient-cwd-gg7 "$proj" "$fakebin" "$sequence" "$counter" "$reads" "$rec"); status=$?
+  expect_code 0 "$status" "spawn should ignore transient unrelated cwd values and reach the project worktree"
+  printf '%s\n' "$proj" "$nongit" "$unrelated" "$wt" > "$TMP_ROOT/spawn-sequence.expected"
+  diff -u "$TMP_ROOT/spawn-sequence.expected" "$reads" >/dev/null \
+    || fail "spawn did not poll through the deterministic transient cwd sequence"
+  meta="$home/state/transient-cwd-gg7.meta"
+  assert_grep "worktree=$wt" "$meta" "spawn metadata did not name the requested project's linked worktree"
+  assert_no_grep "$unrelated" "$meta" "spawn metadata named the unrelated Git repository"
+  assert_present "$wt/.claude/settings.local.json" "spawn did not configure the harness in the requested project's worktree"
+  assert_absent "$unrelated/.claude/settings.local.json" "spawn configured the harness in the unrelated Git repository"
+  last_cwd_line=$(grep -n '^cwd ' "$rec" | tail -n 1 | cut -d: -f1)
+  launch_line=$(grep -n 'send-keys .* -l .*claude' "$rec" | tail -n 1 | cut -d: -f1)
+  [ -n "$last_cwd_line" ] && [ -n "$launch_line" ] && [ "$last_cwd_line" -lt "$launch_line" ] \
+    || fail "harness launch did not occur after the correct worktree cwd was observed"
+  assert_contains "$out" "worktree=$wt" "spawn result did not report the requested project's linked worktree"
+  rm -rf "/tmp/fm-transient-cwd-gg7"
+  pass "fm-spawn: ignores transient non-Git and unrelated-Git cwd values before launching in the project worktree"
+}
+
+test_spawn_times_out_on_unrelated_repo() {
+  local home proj unrelated fakebin sequence counter reads rec out status polls
+  home="$TMP_ROOT/spawn-unrelated-timeout-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-unrelated-timeout-proj")
+  unrelated=$(make_repo "$TMP_ROOT/spawn-unrelated-timeout-repo")
+  fakebin=$(make_spawn_sequence_fakebin "$TMP_ROOT/spawn-unrelated-timeout-fake")
+  sequence="$TMP_ROOT/spawn-unrelated-timeout.paths"
+  counter="$TMP_ROOT/spawn-unrelated-timeout.count"
+  reads="$TMP_ROOT/spawn-unrelated-timeout.reads"
+  rec="$TMP_ROOT/spawn-unrelated-timeout.tmux"
+  printf '%s\n' "$unrelated" > "$sequence"
+
+  out=$(run_spawn_sequence "$home" unrelated-timeout-hh8 "$proj" "$fakebin" "$sequence" "$counter" "$reads" "$rec"); status=$?
+  expect_code 1 "$status" "spawn should time out when every cwd candidate is an unrelated Git repository"
+  assert_contains "$out" "did not enter a worktree within 60s" "unrelated-repo timeout lacked the bounded-timeout error"
+  assert_absent "$home/state/unrelated-timeout-hh8.meta" "unrelated-repo timeout must not record metadata"
+  assert_absent "$unrelated/.claude/settings.local.json" "unrelated-repo timeout configured a harness outside the requested project"
+  polls=$(wc -l < "$reads" | tr -d ' ')
+  [ "$polls" = 60 ] || fail "unrelated-repo timeout should exhaust 60 polls, got $polls"
+  pass "fm-spawn: exhausts the bounded poll when only unrelated Git repositories appear"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
@@ -305,5 +420,7 @@ test_lib_classification
 test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
+test_spawn_times_out_on_unrelated_repo
+test_spawn_ignores_transient_unrelated_paths
 test_spawn_isolation_abort
 test_spawn_tmux_window_construction
