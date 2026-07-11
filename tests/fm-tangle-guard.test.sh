@@ -200,13 +200,13 @@ test_spawn_isolation_abort() {
   # Abort: the pane resolves to a plain non-git directory (not a worktree at all).
   out=$(run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort"
-  assert_contains "$out" "did not enter a worktree within 60s" "non-worktree spawn lacked the bounded-timeout error"
+  assert_contains "$out" "did not enter a worktree of the requested project within 60s" "non-worktree spawn lacked the bounded-timeout error"
   assert_absent "$home/state/abort-notgit-dd4.meta" "aborted spawn must not record meta"
 
   # Abort: the pane resolves INTO the primary checkout (a subdir of PROJ_ABS).
   out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn landing inside the primary checkout should abort"
-  assert_contains "$out" "did not enter a worktree within 60s" "primary-checkout spawn lacked the bounded-timeout error"
+  assert_contains "$out" "did not enter a worktree of the requested project within 60s" "primary-checkout spawn lacked the bounded-timeout error"
 
   # Proceed: the pane resolves to a genuine, isolated worktree.
   out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
@@ -321,12 +321,37 @@ test_spawn_times_out_on_unrelated_repo() {
 
   out=$(run_spawn_sequence "$home" unrelated-timeout-hh8 "$proj" "$fakebin" "$sequence" "$counter" "$reads" "$rec"); status=$?
   expect_code 1 "$status" "spawn should time out when every cwd candidate is an unrelated Git repository"
-  assert_contains "$out" "did not enter a worktree within 60s" "unrelated-repo timeout lacked the bounded-timeout error"
+  assert_contains "$out" "did not enter a worktree of the requested project within 60s" "unrelated-repo timeout lacked the bounded-timeout error"
+  assert_contains "$out" "last observed path '$unrelated'" "unrelated-repo timeout did not report the last observed pane path"
+  assert_contains "$out" "expected '" "unrelated-repo timeout did not report the expected Git common directory"
   assert_absent "$home/state/unrelated-timeout-hh8.meta" "unrelated-repo timeout must not record metadata"
   assert_absent "$unrelated/.claude/settings.local.json" "unrelated-repo timeout configured a harness outside the requested project"
   polls=$(wc -l < "$reads" | tr -d ' ')
   [ "$polls" = 60 ] || fail "unrelated-repo timeout should exhaust 60 polls, got $polls"
   pass "fm-spawn: exhausts the bounded poll when only unrelated Git repositories appear"
+}
+
+test_spawn_fails_fast_on_non_git_project() {
+  local home proj fakebin sequence counter reads rec out status polls
+  home="$TMP_ROOT/spawn-nongit-proj-home"
+  mkdir -p "$home/data"
+  proj="$TMP_ROOT/spawn-nongit-proj"
+  mkdir -p "$proj"
+  fakebin=$(make_spawn_sequence_fakebin "$TMP_ROOT/spawn-nongit-proj-fake")
+  sequence="$TMP_ROOT/spawn-nongit-proj.paths"
+  counter="$TMP_ROOT/spawn-nongit-proj.count"
+  reads="$TMP_ROOT/spawn-nongit-proj.reads"
+  rec="$TMP_ROOT/spawn-nongit-proj.tmux"
+  printf '%s\n' "$proj" > "$sequence"
+
+  out=$(run_spawn_sequence "$home" nongit-proj-jj9 "$proj" "$fakebin" "$sequence" "$counter" "$reads" "$rec"); status=$?
+  expect_code 1 "$status" "spawn of a non-git project should fail fast"
+  assert_contains "$out" "cannot resolve the Git common directory" "non-git project spawn lacked the fail-fast error"
+  assert_absent "$home/state/nongit-proj-jj9.meta" "non-git project spawn must not record metadata"
+  polls=$(wc -l < "$reads" | tr -d ' ')
+  [ "$polls" = 0 ] || fail "non-git project spawn should abort before any worktree poll, got $polls polls"
+  ! grep -q '^tmux new-window' "$rec" || fail "non-git project spawn should abort before creating a window"
+  pass "fm-spawn: fails fast when the requested project's Git common directory is unresolvable"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
@@ -421,6 +446,7 @@ test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_times_out_on_unrelated_repo
+test_spawn_fails_fast_on_non_git_project
 test_spawn_ignores_transient_unrelated_paths
 test_spawn_isolation_abort
 test_spawn_tmux_window_construction

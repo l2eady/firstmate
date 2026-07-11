@@ -672,6 +672,15 @@ isolated_worktree_root_real() {  # <path>
 
 PROJ_GIT_COMMON_REAL=$(canonical_git_common_dir "$PROJ_ABS" || true)
 
+# The treehouse worktree poll below can only ever accept a path sharing the
+# project's canonical Git common dir, so an unresolvable common dir (project is
+# not a git repository) makes the poll unsatisfiable; abort before creating any
+# backend window rather than burning the full poll timeout.
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -z "$PROJ_GIT_COMMON_REAL" ]; then
+  echo "error: cannot resolve the Git common directory for project '$PROJ_ABS' (not a git repository?); treehouse worktree validation cannot succeed, refusing to launch" >&2
+  exit 1
+fi
+
 treehouse_project_worktree_root_real() {  # <path>
   local path=$1 root_real common_real
   root_real=$(isolated_worktree_root_real "$path") || return 1
@@ -864,16 +873,24 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
+  LAST_POLLED_PATH=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && treehouse_project_worktree_root_real "$p" >/dev/null; then
-      WT="$p"
-      break
+    if [ -n "$p" ]; then
+      LAST_POLLED_PATH="$p"
+      if treehouse_project_worktree_root_real "$p" >/dev/null; then
+        WT="$p"
+        break
+      fi
     fi
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    LAST_POLLED_COMMON=""
+    if [ -n "$LAST_POLLED_PATH" ]; then
+      LAST_POLLED_COMMON=$(canonical_git_common_dir "$LAST_POLLED_PATH" || true)
+    fi
+    echo "error: treehouse get did not enter a worktree of the requested project within 60s (last observed path '${LAST_POLLED_PATH:-none}'; its Git common directory '${LAST_POLLED_COMMON:-none}'; expected '$PROJ_GIT_COMMON_REAL'; primary '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi
 
