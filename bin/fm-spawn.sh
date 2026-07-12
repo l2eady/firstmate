@@ -56,7 +56,10 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root distinct from the primary project checkout. Treehouse-backed
+#   spawns additionally require the task worktree and requested project to share
+#   the same canonical Git common directory; Orca keeps its adapter-owned clone
+#   contract and is subject only to the backend-safe isolation check.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -651,13 +654,40 @@ fi
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
-real_path_or_raw() {  # <path>
-  local path=$1 real
-  if real=$(cd "$path" 2>/dev/null && pwd -P); then
-    printf '%s\n' "$real"
-  else
-    printf '%s\n' "$path"
-  fi
+canonical_git_common_dir() {  # <path>
+  local path=$1 common
+  common=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  (cd "$common" 2>/dev/null && pwd -P)
+}
+
+isolated_worktree_root_real() {  # <path>
+  local path=$1 path_real top top_real
+  path_real=$(cd "$path" 2>/dev/null && pwd -P) || return 1
+  top=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null) || return 1
+  top_real=$(cd "$top" 2>/dev/null && pwd -P) || return 1
+  [ "$path_real" = "$top_real" ] || return 1
+  [ "$path_real" != "$PROJ_ABS_REAL" ] || return 1
+  printf '%s\n' "$path_real"
+}
+
+PROJ_GIT_COMMON_REAL=$(canonical_git_common_dir "$PROJ_ABS" || true)
+
+# The treehouse worktree poll below can only ever accept a path sharing the
+# project's canonical Git common dir, so an unresolvable common dir (project is
+# not a git repository) makes the poll unsatisfiable; abort before creating any
+# backend window rather than burning the full poll timeout.
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -z "$PROJ_GIT_COMMON_REAL" ]; then
+  echo "error: cannot resolve the Git common directory for project '$PROJ_ABS' (not a git repository?); treehouse worktree validation cannot succeed, refusing to launch" >&2
+  exit 1
+fi
+
+treehouse_project_worktree_root_real() {  # <path>
+  local path=$1 root_real common_real
+  root_real=$(isolated_worktree_root_real "$path") || return 1
+  [ -n "$PROJ_GIT_COMMON_REAL" ] || return 1
+  common_real=$(canonical_git_common_dir "$path") || return 1
+  [ "$common_real" = "$PROJ_GIT_COMMON_REAL" ] || return 1
+  printf '%s\n' "$root_real"
 }
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
@@ -669,21 +699,25 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
-  fi
-  proj_real=$PROJ_ABS_REAL
+  local source=$1 inspect_target=$2 wt_real wt_top
+  wt_real=$(isolated_worktree_root_real "$WT" || true)
   wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  if [ -z "$wt_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+}
+
+validate_treehouse_project_worktree() {  # <source> <inspect-target>
+  local source=$1 inspect_target=$2 wt_real wt_top wt_common
+  wt_real=$(treehouse_project_worktree_root_real "$WT" || true)
+  if [ -n "$wt_real" ]; then
+    return 0
+  fi
+  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
+  wt_common=$(canonical_git_common_dir "$WT" || true)
+  echo "error: $source did not yield a worktree for the requested project (resolved '$WT'; worktree root '${wt_top:-none}'; Git common directory '${wt_common:-none}'; expected '$PROJ_GIT_COMMON_REAL'; primary '$PROJ_ABS'); refusing to launch. Inspect target $inspect_target" >&2
+  exit 1
 }
 
 W="fm-$ID"
@@ -831,28 +865,38 @@ spawn_send_key() {  # <target> <key>
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the treehouse subshell: the pane's cwd moves from the project to a
+  # linked worktree of that same project. Shell startup can transiently visit
+  # unrelated directories, including other Git repositories, so accept only a
+  # distinct canonical worktree root with the project's canonical common dir.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
+  LAST_POLLED_PATH=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
+    if [ -n "$p" ]; then
+      LAST_POLLED_PATH="$p"
+      if treehouse_project_worktree_root_real "$p" >/dev/null; then
+        WT="$p"
+        break
+      fi
     fi
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    LAST_POLLED_COMMON=""
+    if [ -n "$LAST_POLLED_PATH" ]; then
+      LAST_POLLED_COMMON=$(canonical_git_common_dir "$LAST_POLLED_PATH" || true)
+    fi
+    echo "error: treehouse get did not enter a worktree of the requested project within 60s (last observed path '${LAST_POLLED_PATH:-none}'; its Git common directory '${LAST_POLLED_COMMON:-none}'; expected '$PROJ_GIT_COMMON_REAL'; primary '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  # Re-run the full project-identity check after discovery so the launch boundary
+  # remains fail-closed even if the polling implementation is later refactored.
+  validate_treehouse_project_worktree "treehouse get" "$T"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
