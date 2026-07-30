@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Resolve a project's delivery mode and yolo flag from the data/projects.md registry.
 # Prints two words to stdout: "<mode> <yolo>" where mode is one of
-# no-mistakes|direct-PR|local-only and yolo is on|off.
+# no-mistakes|direct-PR|direct-push|local-only and yolo is on|off.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
@@ -11,6 +11,9 @@
 # mode = how a finished change reaches main:
 #   no-mistakes  full pipeline -> PR -> captain merge (default)
 #   direct-PR    push + PR via gh-axi, no pipeline -> captain merge
+#   direct-push  no pipeline, no PR: crewmate commits and pushes straight to the
+#                default branch. Nothing waits for a merge word. For a captain who
+#                has said they do not use PRs on this project.
 #   local-only   local branch, no remote/PR -> firstmate review -> captain approve -> local merge
 # yolo (orthogonal) = when on, firstmate makes approval decisions itself (PR merges,
 #   ask-user findings, local-only merge approval) without checking the captain - except
@@ -59,7 +62,7 @@ fi
 mode=${parsed%% *}
 yolo=${parsed##* }
 case "$mode" in
-  no-mistakes|direct-PR|local-only) ;;
+  no-mistakes|direct-PR|direct-push|local-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac

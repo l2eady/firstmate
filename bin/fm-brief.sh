@@ -31,6 +31,7 @@
 # and task lifecycle):
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
+#   direct-push  implement -> push straight to the default branch (no pipeline, no PR)
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                firstmate reviews, captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -276,6 +277,31 @@ This project ships **direct-PR**: you raise the PR yourself, without the no-mist
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
+EOF
+)
+    ;;
+  direct-push)
+    SETUP2=""
+    RULE1='1. Never open a pull request. You push your work to the default branch yourself; there is no PR and no merge approval step.'
+    DOD=$(cat <<EOF
+# Definition of done
+This project ships **direct-push**: no no-mistakes pipeline, and **no pull request**.
+The captain does not use PRs here, so do not open one and do not wait for a merge.
+
+Work on your \`fm/$ID\` branch while implementing, then land it yourself:
+
+1. Make sure the work is committed and the tests the project already has still pass.
+2. Rebase onto the current default branch so landing is a clean fast-forward. If \`main\` has
+   advanced under you, rebase - never force-push over work that is not yours.
+3. Push your work to the default branch.
+4. Append \`done: pushed to {default branch} as {sha}\` to the status file and stop.
+
+Because nothing reviews this after you, the bar is on you: do not push work you would not have
+defended in a review. If you are unsure whether a change is correct, say so via \`needs-decision:\`
+before pushing rather than after - once it is on the default branch it is live for everyone.
+
+Never force-push the default branch, never rewrite its history, and never push work you have not
+run.
 EOF
 )
     ;;

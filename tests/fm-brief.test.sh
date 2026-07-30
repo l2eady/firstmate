@@ -18,7 +18,7 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 
 # The script itself must always parse. This is the direct regression test for
 # issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# (no-mistakes/direct-PR/direct-push/local-only) breaks `bash -n` on the whole file.
 test_script_parses() {
   bash -n "$ROOT/bin/fm-brief.sh" 2>&1 || fail "bin/fm-brief.sh fails bash -n (heredoc/quote regression)"
   pass "fm-brief.sh: bash -n succeeds"
@@ -39,6 +39,7 @@ write_registry() {
   cat > "$home/data/projects.md" <<'EOF'
 - direct-proj [direct-PR] - fixture for direct-PR mode (added 2026-07-01)
 - local-proj [local-only] - fixture for local-only mode (added 2026-07-01)
+- push-proj [direct-push] - fixture for direct-push mode (added 2026-07-30)
 EOF
 }
 
@@ -52,7 +53,7 @@ test_ship_modes_generate_clean_briefs() {
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
-  for id_proj in "brief-nomistakes-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
+  for id_proj in "brief-nomistakes-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj" "brief-directpush-a4:push-proj"; do
     id=${id_proj%%:*}
     proj=${id_proj##*:}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
@@ -63,7 +64,27 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
-  pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+  pass "fm-brief.sh: no-mistakes/direct-PR/direct-push/local-only briefs generate cleanly"
+}
+
+# direct-push exists because a captain said they do not use PRs. A brief that
+# still tells the crewmate to open one silently reinstates the workflow the mode
+# was created to remove, so pin both halves: no PR instruction, and an explicit
+# push-to-default-branch instruction.
+test_direct_push_brief_has_no_pr_instruction() {
+  local home brief
+  home="$TMP_ROOT/push-home"
+  write_registry "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-push-b1 push-proj >/dev/null 2>&1
+  brief="$home/data/brief-push-b1/brief.md"
+  assert_present "$brief" "direct-push brief was not scaffolded"
+  assert_grep "direct-push" "$brief" "direct-push brief does not name its mode"
+  assert_grep "no pull request" "$brief" "direct-push brief does not forbid opening a PR"
+  assert_no_grep "open a PR with" "$brief" \
+    "direct-push brief still instructs the crewmate to open a PR"
+  assert_no_grep "done: PR" "$brief" \
+    "direct-push brief still asks for a PR url in the done line"
+  pass "fm-brief.sh: direct-push brief never instructs a PR"
 }
 
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
@@ -261,6 +282,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_direct_push_brief_has_no_pr_instruction
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
