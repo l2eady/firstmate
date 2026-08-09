@@ -278,11 +278,12 @@ test_signal_crew_provably_working_classifier() {
 # state it quotes. Precedence: a lost or unrecorded endpoint first (it makes the
 # rest of the read unreliable), then the reported state, then the source.
 test_signal_reconciliation_detail_precedence() {
-  local out
+  local dir state out
+  dir=$(make_case reconcile-detail-precedence); state="$dir/state"
 
   # A checks-green crew monitoring its PR reports done FROM the status log. That
   # is a completion to record, not an unfinished task to continue.
-  out=$(signal_reconciliation_detail pr-wait-p1 \
+  out=$(signal_reconciliation_detail "$state" pr-wait-p1 \
     'state: done · source: status-log · PR ready · run still monitoring PR' turn-end)
   case "$out" in
     *'reports done'*) ;;
@@ -293,7 +294,7 @@ test_signal_reconciliation_detail_precedence() {
   esac
 
   # A genuinely idle crew with no run to consult still gets continue-the-task guidance.
-  out=$(signal_reconciliation_detail idle-p2 \
+  out=$(signal_reconciliation_detail "$state" idle-p2 \
     'state: unknown · source: status-log · working: implementing' turn-end)
   case "$out" in
     *'endpoint alive but idle'*) ;;
@@ -301,7 +302,7 @@ test_signal_reconciliation_detail_precedence() {
   esac
 
   # Endpoint loss outranks a done state: the read itself is unreliable.
-  out=$(signal_reconciliation_detail gone-p3 \
+  out=$(signal_reconciliation_detail "$state" gone-p3 \
     'state: done · source: run-step · outcome: checks-passed · endpoint: gone' turn-end)
   case "$out" in
     *'endpoint gone'*) ;;
@@ -319,7 +320,7 @@ test_signal_reconciliation_detail_reads_the_status_log() {
   dir=$(make_case reconcile-detail-status); state="$dir/state"
   printf 'working: building\ndone: PR https://x/y/pull/21 checks green\n' > "$state/rep-r5.status"
 
-  out=$(FM_STATE_OVERRIDE="$state" signal_reconciliation_detail rep-r5 \
+  out=$(signal_reconciliation_detail "$state" rep-r5 \
     'state: unknown · source: none · backend target gone: sess:fm-rep-r5 · endpoint: gone' turn-end)
   case "$out" in
     *'with no terminal status'*) fail "a crew that already reported done was described as having none: $out" ;;
@@ -335,13 +336,68 @@ test_signal_reconciliation_detail_reads_the_status_log() {
 
   # A crew that genuinely never reported a terminal keeps the claim.
   printf 'working: building\n' > "$state/rep-r6.status"
-  out=$(FM_STATE_OVERRIDE="$state" signal_reconciliation_detail rep-r6 \
+  out=$(signal_reconciliation_detail "$state" rep-r6 \
     'state: unknown · source: none · backend target gone: sess:fm-rep-r6 · endpoint: gone' turn-end)
   case "$out" in
     *'after turn end with no terminal status'*) ;;
     *) fail "a crew with no terminal status lost that context: $out" ;;
   esac
   pass "signal_reconciliation_detail takes the terminal-status claim from the status log, not the wake's file list"
+}
+
+# Reconciliation confirms a lost endpoint in one bounded re-probe while the
+# watcher needs several consecutive polls, so it is usually the FIRST detector to
+# describe a dead secondmate - and it writes the shared episode record, which
+# then suppresses the watcher's own wake. Its wording therefore has to be
+# kind-aware too, or the captain-facing item names an artifact that does not
+# exist.
+test_signal_reconciliation_detail_is_kind_aware() {
+  local dir state out
+  dir=$(make_case reconcile-detail-kind); state="$dir/state"
+  printf 'window=sess:fm-sec-k1\nkind=secondmate\nhome=%s\n' "$dir/home" > "$state/sec-k1.meta"
+  printf 'window=sess:fm-crew-k2\nkind=ship\nworktree=%s\n' "$dir/wt" > "$state/crew-k2.meta"
+
+  out=$(signal_reconciliation_detail "$state" sec-k1 \
+    'state: unknown · source: none · backend target gone: sess:fm-sec-k1 · endpoint: gone' turn-end)
+  case "$out" in
+    *'relaunch it in its recorded firstmate home'*) ;;
+    *) fail "a dead secondmate was given crewmate recovery wording: $out" ;;
+  esac
+  case "$out" in
+    *worktree*) fail "a dead secondmate's recovery named a worktree it does not have: $out" ;;
+  esac
+
+  out=$(signal_reconciliation_detail "$state" crew-k2 \
+    'state: unknown · source: none · backend target gone: sess:fm-crew-k2 · endpoint: gone' turn-end)
+  case "$out" in
+    *'resume or relaunch from recorded metadata and worktree'*) ;;
+    *) fail "a dead crewmate lost its worktree recovery wording: $out" ;;
+  esac
+  pass "signal_reconciliation_detail gives a dead secondmate its home, not a worktree"
+}
+
+# Every sibling in the classifier takes the state dir explicitly. Reading it from
+# an ambient global instead would silently read "/<task>.status" whenever a
+# caller's state dir differs, emptying the last-reported context and re-adding
+# the false "with no terminal status" claim.
+test_signal_reconciliation_detail_uses_the_passed_state() {
+  local dir state other out
+  dir=$(make_case reconcile-detail-explicit-state); state="$dir/state"; other="$dir/other"
+  mkdir -p "$other"
+  printf 'done: PR https://x/y/pull/31 checks green\n' > "$other/rep-r7.status"
+  # The ambient state dir deliberately holds a DIFFERENT story for the same task.
+  printf 'working: still building\n' > "$state/rep-r7.status"
+
+  out=$(STATE="$state" FM_STATE_OVERRIDE="$state" signal_reconciliation_detail "$other" rep-r7 \
+    'state: unknown · source: none · backend target gone: sess:fm-rep-r7 · endpoint: gone' turn-end)
+  case "$out" in
+    *'last reported: done: PR https://x/y/pull/31 checks green'*) ;;
+    *) fail "the detail read an ambient state dir instead of the one it was passed: $out" ;;
+  esac
+  case "$out" in
+    *'with no terminal status'*) fail "the passed state dir's terminal status was missed: $out" ;;
+  esac
+  pass "signal_reconciliation_detail reads the state dir it is given, not an ambient global"
 }
 
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
@@ -1502,6 +1558,8 @@ test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
 test_signal_reconciliation_detail_precedence
 test_signal_reconciliation_detail_reads_the_status_log
+test_signal_reconciliation_detail_is_kind_aware
+test_signal_reconciliation_detail_uses_the_passed_state
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced

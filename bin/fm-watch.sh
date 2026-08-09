@@ -436,13 +436,7 @@ endpoint_miss_record() {  # <window> <task> [last-status-line] [kind]
   printf '%s %s' "$n" "$now" > "$STATE/.endpoint-miss-$key"
   [ "$n" -ge "$ENDPOINT_MISS_POLLS" ] || return 0
   [ -e "$STATE/.endpoint-surfaced-$key" ] && return 0
-  # A secondmate has no task worktree: it is recovered by relaunching in its own
-  # firstmate home, so naming a worktree would send away mode at the wrong thing.
-  if [ "$kind" = secondmate ]; then
-    recovery='relaunch it in its recorded firstmate home, then continue supervision'
-  else
-    recovery='resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision'
-  fi
+  recovery=$(endpoint_recovery_advice "$kind")
   # Carry what the task last reported. A crew that already reported done and is
   # waiting on a merge has a legitimately closed endpoint, and away mode acts on
   # this digest line itself rather than on any operator prose, so a bare relaunch

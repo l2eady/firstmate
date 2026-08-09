@@ -675,12 +675,17 @@ endpoint_miss_reset() {  # <state> <window>
 
 # 0 once this window has been unreadable for enough consecutive rechecks to be
 # treated as lost; 1 below the threshold, meaning keep waiting and recheck.
+# Sanitizes the shared threshold the same way the watcher does: an unusable value
+# left in a home's environment must fall back, not silently disable this detector
+# while the watcher keeps confirming at its own default.
 endpoint_loss_confirmed() {  # <state> <window>
-  local state=$1 win=$2 f n
+  local state=$1 win=$2 f n threshold
+  threshold=${FM_ENDPOINT_MISS_POLLS:-$ENDPOINT_MISS_POLLS_DEFAULT}
+  case "$threshold" in ''|*[!0-9]*) threshold=$ENDPOINT_MISS_POLLS_DEFAULT ;; esac
   f=$(_endpoint_miss_file "$state" "$win")
   n=$(( $(cat "$f" 2>/dev/null || echo 0) + 1 ))
   printf '%s' "$n" > "$f"
-  [ "$n" -ge "${FM_ENDPOINT_MISS_POLLS:-$ENDPOINT_MISS_POLLS_DEFAULT}" ]
+  [ "$n" -ge "$threshold" ]
 }
 
 # state/.endpoint-surfaced-<window> is the SHARED per-episode record for a lost
@@ -753,7 +758,7 @@ reconcile_task_dedupe_hook() {  # <task> <class> <detail>
 signal_reconciliation_decision() {  # <state> <file> ...
   local state=$1; shift
   FM_RECONCILE_HOOK_STATE="$state" FM_RECONCILE_TASK_HOOK=reconcile_task_dedupe_hook \
-    signal_crew_reconciliation "$@"
+    signal_crew_reconciliation "$state" "$@"
 }
 
 # Mark every captain-relevant status line a per-wake classification escalated as

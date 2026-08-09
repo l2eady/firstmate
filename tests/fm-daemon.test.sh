@@ -1253,6 +1253,30 @@ test_reconciliation_endpoint_loss_shares_the_episode_record() {
   pass "no-verb reconciliation participates in the shared endpoint-loss episode record"
 }
 
+test_housekeeping_tolerates_an_unusable_miss_threshold() {
+  # Both endpoint detectors read FM_ENDPOINT_MISS_POLLS. The watcher falls back
+  # on an unusable value; if the daemon did not, its arithmetic test would error
+  # and the stale-recheck endpoint escalation would be permanently disabled while
+  # the watcher kept confirming - the two silently applying different thresholds.
+  local dir state fakebin key
+  dir=$(make_supercase stale-endpoint-bad-threshold)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/badcfg-w15.meta" "window=sess:fm-badcfg-w15" "kind=ship"
+  printf 'working: building\n' > "$state/badcfg-w15.status"
+  key=$(printf '%s' "badcfg-w15" | tr ':/.' '___')
+
+  # Two back-to-back unreadable rechecks, which is the default threshold.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=lots housekeeping "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=lots housekeeping "$state"
+
+  grep -F 'task badcfg-w15 endpoint unreadable' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "an unusable miss threshold disabled the daemon's endpoint detector: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  pass "an unusable miss threshold falls back instead of disabling the daemon's endpoint detector"
+}
+
 test_housekeeping_defers_to_the_watcher_endpoint_wake() {
   # The watcher's own endpoint-liveness poll already wakes firstmate with a
   # richer message. One lost endpoint must not put two lines in the same digest.
@@ -2093,6 +2117,7 @@ test_housekeeping_recovered_endpoint_resets_miss_count
 test_housekeeping_miss_count_requires_consecutive_rechecks
 test_housekeeping_declared_pause_resets_miss_count
 test_reconciliation_endpoint_loss_shares_the_episode_record
+test_housekeeping_tolerates_an_unusable_miss_threshold
 test_housekeeping_defers_to_the_watcher_endpoint_wake
 test_classify_stale_dedup_against_signal
 test_pane_input_pending_bordered_idle_not_pending

@@ -124,27 +124,12 @@ signal_reason_is_actionable() {  # <file> ...
   return 1
 }
 
-# Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
-# from bin/fm-crew-state.sh's one authoritative current-state line
-# ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
-#   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
-#             pane; the crew is legitimately mid-work on a static-looking pane
-#             (e.g. waiting on CI);
-#   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
-#   orphan  - no state/<id>.meta: the task is gone, so the signal is leftover
-#             state from a finished task and there is no crew to wake for;
-#   none    - none of those, so the wake must surface (a stopped/finished/parked/
-#             failed/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
-# NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
-# run it only on no-verb signal and first-sighting stale paths, never every wake.
-# FM_CREW_STATE_BIN lets tests stub the verdict.
 # Read one canonical current-state line for a crew. Keeping this read separate
 # from the parser lets signal reconciliation use the same bounded lookup once per
 # task while retaining the full detail needed for a recovery recommendation.
+# NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
+# run it only on no-verb signal and first-sighting stale paths, never every wake.
+# FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_state_line() {  # <id>
   local id=$1 line
   [ -n "$id" ] || return 0
@@ -162,8 +147,23 @@ task_is_orphan() {  # <state> <id>
   [ -n "$1" ] && [ -d "$1" ] && [ ! -e "$1/$2.meta" ]
 }
 
-# Pure parser for one fm-crew-state.sh line. This is the single mapping from the
-# current-state reader onto the working/paused/none absorb vocabulary.
+# Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
+# from bin/fm-crew-state.sh's one authoritative current-state line
+# ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
+#   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
+#             pane; the crew is legitimately mid-work on a static-looking pane
+#             (e.g. waiting on CI);
+#   paused  - the crew's authoritative current state is a declared external-wait
+#             pause (paused:), which is EXPECTED to idle;
+#   orphan  - no state/<id>.meta: the task is gone, so the signal is leftover
+#             state from a finished task and there is no crew to wake for;
+#   none    - none of those, so the wake must surface (a stopped/finished/parked/
+#             failed/unknown crew, or an unreadable verdict).
+# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
+# authoritatively (not the status log) is what keeps run-step precedence: a crew
+# that appended paused: but then STARTED a run reports working, never paused.
+# This pure parser is the single mapping from the current-state reader onto that
+# working/paused/none vocabulary; crew_absorb_class is the read-plus-parse pair.
 crew_absorb_class_from_line() {  # <state-line>
   local line=$1 state src
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
@@ -205,21 +205,42 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# The recorded kind of a task, or `unknown` when it has no readable metadata.
+task_kind() {  # <state> <task>
+  local kind
+  [ -n "$1" ] && [ -e "$1/$2.meta" ] || { printf 'unknown'; return; }
+  kind=$(grep '^kind=' "$1/$2.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  printf '%s' "${kind:-ship}"
+}
+
+# The recovery clause for a confirmed lost endpoint. Every detector emits the
+# same guidance for the same kind of direct report, so the wording lives here
+# once: a secondmate has no task worktree - its metadata records a home, and it
+# is recovered by relaunching there - while a crewmate may simply have finished.
+endpoint_recovery_advice() {  # <kind>
+  if [ "$1" = secondmate ]; then
+    printf 'relaunch it in its recorded firstmate home, then continue supervision'
+  else
+    printf 'resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision'
+  fi
+}
+
 # Describe the recovery action for a no-verb signal whose crew is neither
 # provably working nor deliberately paused. The caller already performed one
-# bounded current-state read, so this is a pure formatting decision over that
-# evidence. It deliberately carries the task id and distinguishes a lost
-# endpoint from a live idle endpoint, recognising endpoint loss through the same
-# crew_state_endpoint_lost predicate that picks the endpoint-lost class, so the
-# prose and the class can never disagree about what this line reports.
-signal_reconciliation_detail() {  # <id> <state-line> <turn-end|status-signal>
-  local task=$1 line=$2 context=$3 state phrase last
+# bounded current-state read, so this is a formatting decision over that evidence
+# plus two cheap reads of the task's own recorded files. It deliberately carries
+# the task id and distinguishes a lost endpoint from a live idle endpoint,
+# recognising endpoint loss through the same crew_state_endpoint_lost predicate
+# that picks the endpoint-lost class, so the prose and the class can never
+# disagree about what this line reports.
+signal_reconciliation_detail() {  # <state> <id> <state-line> <turn-end|status-signal>
+  local sdir=$1 task=$2 line=$3 context=$4 state phrase last
   # "no terminal status" is a claim about the TASK, not about which files the
   # wake happened to name, so it has to be read from the status log. A crew that
   # reported done before the daemon started has no seen-status marker yet, and
   # asserting it never reported would point away mode at relaunching finished
   # work.
-  last=$(last_status_line "${STATE:-${FM_STATE_OVERRIDE:-}}/$task.status")
+  last=$(last_status_line "$sdir/$task.status")
   if [ "$context" = turn-end ]; then
     phrase='after turn end'
   else
@@ -232,8 +253,9 @@ signal_reconciliation_detail() {  # <id> <state-line> <turn-end|status-signal>
   # Endpoint loss outranks everything: it is the one fact that makes the rest of
   # the read unreliable, whatever state it reports.
   if crew_state_endpoint_lost "$line"; then
-    printf 'task %s endpoint gone %s (%s); last reported: %s; recommended recovery: resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision' \
-      "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
+    printf 'task %s endpoint gone %s (%s); last reported: %s; recommended recovery: %s' \
+      "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}" \
+      "$(endpoint_recovery_advice "$(task_kind "$sdir" "$task")")"
     return
   fi
   case "$line" in
@@ -326,17 +348,24 @@ crew_state_endpoint_lost() {  # <state-line>
 }
 
 # Reconcile ONE task with exactly one bounded fm-crew-state.sh read and print
-# "<working|paused|endpoint-lost|actionable>|<detail>". This is the single
+# "<working|paused|orphan|endpoint-lost|actionable>|<detail>". This is the single
 # per-task decision every reconciliation consumer shares: the aggregate below,
 # and the away-mode daemon, which needs per-task granularity to apply its
 # escalation dedupe without a second live-state read. `endpoint-lost` is an
 # actionable sub-class - the fold treats it exactly like `actionable` - reported
 # separately so a consumer can recognise the shared condition without parsing the
-# human-facing detail text.
-crew_signal_reconciliation() {  # <task> [turn-end|status-signal]
-  local task=$1 context=${2:-status-signal} line class
+# human-facing detail text. `orphan` is the opposite: a task with no recorded
+# metadata is gone, so its leftover signal is absorbed without a live-state read.
+crew_signal_reconciliation() {  # <state> <task> [turn-end|status-signal]
+  local sdir=$1 task=$2 context=${3:-status-signal} line class
   if [ -z "$task" ]; then
     printf 'actionable|signal did not resolve a task; recommended action: inspect the queued wake and reconcile its task metadata'
+    return
+  fi
+  # A gone task is settled before any live-state read: there is nothing to
+  # reconcile and no crew left to wake for.
+  if task_is_orphan "$sdir" "$task"; then
+    printf 'orphan|task %s is gone (no recorded metadata); its leftover signal has nothing to wake for' "$task"
     return
   fi
   line=$(crew_state_line "$task")
@@ -346,9 +375,9 @@ crew_signal_reconciliation() {  # <task> [turn-end|status-signal]
     paused)  printf 'paused|task %s is in a declared external pause (%s)' "$task" "${line:-state unreadable}" ;;
     *)
       if crew_state_endpoint_lost "$line"; then
-        printf 'endpoint-lost|%s' "$(signal_reconciliation_detail "$task" "$line" "$context")"
+        printf 'endpoint-lost|%s' "$(signal_reconciliation_detail "$sdir" "$task" "$line" "$context")"
       else
-        printf 'actionable|%s' "$(signal_reconciliation_detail "$task" "$line" "$context")"
+        printf 'actionable|%s' "$(signal_reconciliation_detail "$sdir" "$task" "$line" "$context")"
       fi ;;
   esac
 }
@@ -372,16 +401,17 @@ crew_signal_reconciliation() {  # <task> [turn-end|status-signal]
 # stdout means the caller already covered that task (its own dedupe), which is
 # what turns an all-covered verdict into `seen`. The hook owns persistence only;
 # the classification and the fold stay here.
-signal_crew_reconciliation() {  # <file> ...
+signal_crew_reconciliation() {  # <state> <file> ...
+  local sdir=$1; shift
   local task context rec class detail hooked seen="" details="" covered="" overall=working
   while IFS="$(printf '\t')" read -r task context; do
     [ -n "$task" ] || continue
     seen="$seen $task"
-    # A gone task is absorbed before any live-state read: there is nothing to
-    # reconcile and nobody to wake for.
-    if task_is_orphan "$(signal_task_state_dir "$task" "$@")" "$task"; then continue; fi
-    rec=$(crew_signal_reconciliation "$task" "$context")
+    rec=$(crew_signal_reconciliation "$sdir" "$task" "$context")
     class=${rec%%|*}; detail=${rec#*|}
+    # A gone task is absorbed without reaching the caller's bookkeeping: there is
+    # nothing to dedupe against and nothing left to escalate.
+    if [ "$class" = orphan ]; then continue; fi
     if [ -n "${FM_RECONCILE_TASK_HOOK:-}" ]; then
       hooked=$("$FM_RECONCILE_TASK_HOOK" "$task" "$class" "$detail")
     else

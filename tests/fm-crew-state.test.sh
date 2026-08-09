@@ -998,7 +998,7 @@ test_reconcile_active_run_with_dead_endpoint_is_actionable() {
   assert_contains "$out" "endpoint: gone" "reconciliation reports the independently lost endpoint"
 
   decision=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
-    signal_crew_reconciliation "$state_file")
+    signal_crew_reconciliation "$d/state" "$state_file")
   case "$decision" in actionable\|*) ;; *) fail "dead endpoint with an active run was absorbed: $decision" ;; esac
   assert_contains "$decision" "task feat-dead-reconcile" "recovery detail carries the task id"
   assert_contains "$decision" "recommended recovery:" "recovery detail carries the next action"
