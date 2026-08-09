@@ -400,6 +400,38 @@ test_signal_reconciliation_detail_uses_the_passed_state() {
   pass "signal_reconciliation_detail reads the state dir it is given, not an ambient global"
 }
 
+# --reconcile appends a dedicated `endpoint:` field last, and that field is the
+# only authority on endpoint liveness. A crew's own status note is free text that
+# lands in the detail field ahead of it - a crewmate reporting a dead sub-agent
+# as "blocked: backend target gone: <child>" must not be read as having lost its
+# OWN endpoint, or away mode is told to relaunch a live crew.
+test_endpoint_verdict_ignores_free_text_status_detail() {
+  local line
+
+  line='state: blocked · source: status-log · backend target gone: sess:fm-child-x · endpoint: alive'
+  ! crew_state_endpoint_lost "$line" \
+    || fail "a live endpoint was read as lost because the crew's own note mentioned one"
+  [ "$(crew_absorb_class_from_line "$line")" = none ] \
+    || fail "a blocked crew with a live endpoint stopped being actionable"
+
+  line='state: working · source: run-step · child pane reported endpoint: gone · endpoint: alive'
+  ! crew_state_endpoint_lost "$line" \
+    || fail "free text naming a gone endpoint outranked the authoritative field"
+  [ "$(crew_absorb_class_from_line "$line")" = working ] \
+    || fail "a provably working crew was surfaced because its note mentioned a gone endpoint"
+
+  # The authoritative field still decides a real loss.
+  line='state: unknown · source: none · backend target gone: sess:fm-real · endpoint: gone'
+  crew_state_endpoint_lost "$line" || fail "a genuinely lost endpoint stopped being recognised"
+  [ "$(crew_absorb_class_from_line "$line")" = none ] || fail "a lost endpoint became absorbable"
+
+  # A line with no such field (the default operator read) keeps the old evidence.
+  line='state: unknown · source: none · backend target gone: sess:fm-legacy'
+  crew_state_endpoint_lost "$line" \
+    || fail "a line without the dedicated field lost its fallback recognition"
+  pass "the dedicated endpoint field decides endpoint loss, never the crew's free-text detail"
+}
+
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
 
 test_provably_working_signal_absorbed() {
@@ -1560,6 +1592,7 @@ test_signal_reconciliation_detail_precedence
 test_signal_reconciliation_detail_reads_the_status_log
 test_signal_reconciliation_detail_is_kind_aware
 test_signal_reconciliation_detail_uses_the_passed_state
+test_endpoint_verdict_ignores_free_text_status_detail
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced

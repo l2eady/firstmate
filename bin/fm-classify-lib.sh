@@ -165,9 +165,14 @@ task_is_orphan() {  # <state> <id>
 # This pure parser is the single mapping from the current-state reader onto that
 # working/paused/none vocabulary; crew_absorb_class is the read-plus-parse pair.
 crew_absorb_class_from_line() {  # <state-line>
-  local line=$1 state src
+  local line=$1 state src endpoint
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
-  case "$line" in *'endpoint: gone'*|*'endpoint: unknown'*) printf 'none'; return ;; esac
+  endpoint=$(crew_state_endpoint_field "$line")
+  case "$endpoint" in
+    alive) ;;
+    gone|unknown) printf 'none'; return ;;
+    *) case "$line" in *'endpoint: gone'*|*'endpoint: unknown'*) printf 'none'; return ;; esac ;;
+  esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
@@ -335,12 +340,31 @@ signal_wake_tasks() {  # <file> ...
   done
 }
 
+# The value of the dedicated trailing `endpoint:` field bin/fm-crew-state.sh
+# appends in --reconcile mode, or nothing when the line carries no such field
+# (the default operator read). Taking the LAST occurrence is what makes the
+# appended field authoritative: a crew's own status note can mention an endpoint
+# in its free text, and that text must never decide the endpoint verdict.
+crew_state_endpoint_field() {  # <state-line>
+  local tail
+  case "$1" in *'endpoint: '*) ;; *) return 0 ;; esac
+  tail=${1##*endpoint: }
+  printf '%s' "${tail%% *}"
+}
+
 # 0 when a current-state line reports the crew's ENDPOINT as lost, as opposed to
 # any other actionable condition. Endpoint loss is the one condition several
 # supervision detectors can observe independently, so naming it here keeps the
 # recognition in the classifier instead of leaving each consumer to guess it from
-# the recovery prose it happens to have been handed.
+# the recovery prose it happens to have been handed. The authoritative field wins
+# outright; the free-text patterns are only the fallback for a line that has no
+# such field.
 crew_state_endpoint_lost() {  # <state-line>
+  case "$(crew_state_endpoint_field "$1")" in
+    gone)  return 0 ;;
+    alive) return 1 ;;
+    unknown) return 1 ;;
+  esac
   case "$1" in
     *'endpoint: gone'*|*'backend target gone:'*) return 0 ;;
   esac

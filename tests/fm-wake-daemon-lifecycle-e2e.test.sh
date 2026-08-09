@@ -106,7 +106,7 @@ test_routine_then_terminal_after_restart() {
     || fail "escalate_flush failed for the buffered digest"
   [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "buffered digest was not submitted exactly once"
   [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after a successful flush"
-  unset FM_FAKE_CREW_STATE
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
   pass "lifecycle: routine self-handles, terminal survives a watcher restart, buffers once, no dup, injects once"
 }
 
@@ -210,7 +210,7 @@ test_turn_end_reconciliation_shapes() {
   key=$(printf '%s' 'cv-v2-po-pilot-audit-q5' | tr ':/.' '___')
   [ -e "$state/.subsuper-paused-$key" ] || fail "declared external pause did not retain bounded recheck tracking"
 
-  unset FM_FAKE_CREW_STATE
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
   pass "turn-ended reconciliation covers endpoint gone, idle unfinished, terminal done, and declared external pause"
 }
 

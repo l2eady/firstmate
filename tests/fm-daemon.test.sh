@@ -1253,6 +1253,30 @@ test_reconciliation_endpoint_loss_shares_the_episode_record() {
   pass "no-verb reconciliation participates in the shared endpoint-loss episode record"
 }
 
+test_housekeeping_endpoint_advice_is_kind_aware() {
+  # The stale recheck is the third endpoint-loss detector. Its recovery wording
+  # has to come from the same shared formatter as the other two, or a dead
+  # secondmate is sent to recover from a worktree it does not have.
+  local dir state fakebin key
+  dir=$(make_supercase stale-endpoint-secondmate)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/sec-w16.meta" "window=sess:fm-sec-w16" "kind=secondmate" "home=$dir/home"
+  printf 'working: supervising its own fleet\n' > "$state/sec-w16.status"
+  key=$(printf '%s' "sec-w16" | tr ':/.' '___')
+
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 housekeeping "$state"
+
+  grep -F 'task sec-w16 endpoint unreadable' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the secondmate's lost endpoint was not escalated: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  grep -F 'relaunch it in its recorded firstmate home' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the stale recheck gave a secondmate crewmate recovery wording: $(cat "$state/.subsuper-escalations")"
+  grep -F 'worktree' "$state/.subsuper-escalations" >/dev/null \
+    && fail "the stale recheck named a worktree the secondmate does not have: $(cat "$state/.subsuper-escalations")"
+  pass "the stale recheck's endpoint advice comes from the shared kind-aware formatter"
+}
+
 test_housekeeping_tolerates_an_unusable_miss_threshold() {
   # Both endpoint detectors read FM_ENDPOINT_MISS_POLLS. The watcher falls back
   # on an unusable value; if the daemon did not, its arithmetic test would error
@@ -2117,6 +2141,7 @@ test_housekeeping_recovered_endpoint_resets_miss_count
 test_housekeeping_miss_count_requires_consecutive_rechecks
 test_housekeeping_declared_pause_resets_miss_count
 test_reconciliation_endpoint_loss_shares_the_episode_record
+test_housekeeping_endpoint_advice_is_kind_aware
 test_housekeeping_tolerates_an_unusable_miss_threshold
 test_housekeeping_defers_to_the_watcher_endpoint_wake
 test_classify_stale_dedup_against_signal

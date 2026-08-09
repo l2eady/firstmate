@@ -1251,7 +1251,7 @@ housekeeping() {  # <state>
            endpoint_miss_reset "$state" "$win"
            rm -f "$marker"
          elif endpoint_loss_confirmed "$state" "$win"; then
-           escalate_add "$state" "task $task endpoint unreadable after ${age}s idle ($win); last reported: ${last:-no status}; recommended recovery: resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision"
+           escalate_add "$state" "task $task endpoint unreadable after ${age}s idle ($win); last reported: ${last:-no status}; recommended recovery: $(endpoint_recovery_advice "$(task_kind "$state" "$task")")"
            endpoint_mark_surfaced "$state" "$win"
            endpoint_miss_reset "$state" "$win"
            rm -f "$marker"
