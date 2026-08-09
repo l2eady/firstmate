@@ -302,11 +302,26 @@ signal_wake_tasks() {  # <file> ...
   done
 }
 
+# 0 when a current-state line reports the crew's ENDPOINT as lost, as opposed to
+# any other actionable condition. Endpoint loss is the one condition several
+# supervision detectors can observe independently, so naming it here keeps the
+# recognition in the classifier instead of leaving each consumer to guess it from
+# the recovery prose it happens to have been handed.
+crew_state_endpoint_lost() {  # <state-line>
+  case "$1" in
+    *'endpoint: gone'*|*'backend target gone:'*) return 0 ;;
+  esac
+  return 1
+}
+
 # Reconcile ONE task with exactly one bounded fm-crew-state.sh read and print
-# "<working|paused|actionable>|<detail>". This is the single per-task decision
-# every reconciliation consumer shares: the aggregate below, and the away-mode
-# daemon, which needs per-task granularity to apply its escalation dedupe
-# without a second live-state read.
+# "<working|paused|endpoint-lost|actionable>|<detail>". This is the single
+# per-task decision every reconciliation consumer shares: the aggregate below,
+# and the away-mode daemon, which needs per-task granularity to apply its
+# escalation dedupe without a second live-state read. `endpoint-lost` is an
+# actionable sub-class - the fold treats it exactly like `actionable` - reported
+# separately so a consumer can recognise the shared condition without parsing the
+# human-facing detail text.
 crew_signal_reconciliation() {  # <task> [turn-end|status-signal]
   local task=$1 context=${2:-status-signal} line class
   if [ -z "$task" ]; then
@@ -318,7 +333,12 @@ crew_signal_reconciliation() {  # <task> [turn-end|status-signal]
   case "$class" in
     working) printf 'working|task %s is provably working (%s)' "$task" "${line:-state unreadable}" ;;
     paused)  printf 'paused|task %s is in a declared external pause (%s)' "$task" "${line:-state unreadable}" ;;
-    *)       printf 'actionable|%s' "$(signal_reconciliation_detail "$task" "$line" "$context")" ;;
+    *)
+      if crew_state_endpoint_lost "$line"; then
+        printf 'endpoint-lost|%s' "$(signal_reconciliation_detail "$task" "$line" "$context")"
+      else
+        printf 'actionable|%s' "$(signal_reconciliation_detail "$task" "$line" "$context")"
+      fi ;;
   esac
 }
 

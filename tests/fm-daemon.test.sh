@@ -1149,6 +1149,110 @@ test_housekeeping_recovered_endpoint_resets_miss_count() {
   pass "a readable endpoint resets the consecutive-miss count so blips cannot accumulate"
 }
 
+test_housekeeping_miss_count_requires_consecutive_rechecks() {
+  # The miss count means CONSECUTIVE unreadable rechecks. Regression: one old
+  # blip must not survive a refreshed wedge timer and pair with an unrelated
+  # later blip to "confirm" a loss for a crew that is alive and running.
+  local dir state fakebin key wkey
+  dir=$(make_supercase stale-endpoint-nonconsecutive)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/live-w12.meta" "window=sess:fm-live-w12" "kind=ship"
+  printf 'working: building\n' > "$state/live-w12.status"
+  key=$(printf '%s' "live-w12" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-live-w12" | tr ':/.' '___')
+
+  # Tick 1: aged wedge timer plus one transient capture blip.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ -e "$state/.subsuper-endpoint-miss-$wkey" ] || fail "the first unreadable recheck recorded no miss count"
+
+  # Tick 2: a stale wake refreshed the timer, so this tick performs no probe at
+  # all. That breaks the run - the blip above is no longer consecutive with
+  # anything that follows.
+  date +%s > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ ! -e "$state/.subsuper-endpoint-miss-$wkey" ] \
+    || fail "a tick that never probed kept the old miss count alive"
+
+  # Tick 3: the timer ages out again and an unrelated single blip occurs. With a
+  # correct consecutive rule this is only the FIRST miss, so nothing is confirmed.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "two non-consecutive blips confirmed a lost endpoint for a live crew: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.endpoint-surfaced-$wkey" ] \
+    || fail "a live crew's episode was marked surfaced, suppressing the watcher's own detector"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "the genuine wedge timer was dropped along with the false confirmation"
+  pass "the endpoint miss count only accumulates across back-to-back rechecks"
+}
+
+test_housekeeping_declared_pause_resets_miss_count() {
+  # A declared external pause skips the probe too, so it must end the run.
+  local dir state fakebin key wkey
+  dir=$(make_supercase stale-endpoint-pause-reset)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/held-w13.meta" "window=sess:fm-held-w13" "kind=ship"
+  printf 'working: building\n' > "$state/held-w13.status"
+  key=$(printf '%s' "held-w13" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-held-w13" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ -e "$state/.subsuper-endpoint-miss-$wkey" ] || fail "the first unreadable recheck recorded no miss count"
+
+  printf 'working: building\npaused: awaiting the vendor rate-limit reset\n' > "$state/held-w13.status"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ ! -e "$state/.subsuper-endpoint-miss-$wkey" ] \
+    || fail "a declared pause kept a stale miss count alive"
+  pass "a declared external pause ends the endpoint miss run instead of preserving it"
+}
+
+test_reconciliation_endpoint_loss_shares_the_episode_record() {
+  # Endpoint loss can be confirmed by no-verb reconciliation, by the daemon's
+  # stale recheck, or by the watcher's poll. Regression: whichever gets there
+  # first must record the shared episode, and the others must defer, or one lost
+  # endpoint puts two relaunch recommendations in the same digest.
+  local dir state fakebin crew_state out wkey
+  dir=$(make_supercase reconcile-endpoint-episode)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/orphan-r4.meta" "window=sess:fm-orphan-r4" "kind=ship"
+  printf 'working: building\n' > "$state/orphan-r4.status"
+  : > "$state/orphan-r4.turn-ended"
+  wkey=$(printf '%s' "sess:fm-orphan-r4" | tr ':/.' '___')
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-orphan-r4 · endpoint: gone' \
+    classify_signal "$state/orphan-r4.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "a lost endpoint was not escalated by reconciliation: $out" ;; esac
+  [ -e "$state/.endpoint-surfaced-$wkey" ] \
+    || fail "reconciliation escalated a lost endpoint without recording the shared episode"
+
+  # The daemon's stale recheck must now defer to it rather than repeat it.
+  local key
+  key=$(printf '%s' "orphan-r4" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "the stale recheck repeated an endpoint loss reconciliation already surfaced: $(cat "$state/.subsuper-escalations")"
+
+  # A crew that reconciles as working again ends the episode's miss run.
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating · endpoint: alive' \
+    classify_signal "$state/orphan-r4.turn-ended" "$state")
+  case "$out" in self\|*) ;; *) fail "a recovered crew did not self-handle: $out" ;; esac
+  [ ! -e "$state/.subsuper-endpoint-miss-$wkey" ] \
+    || fail "a crew reconciling as working left its endpoint miss run in place"
+  pass "no-verb reconciliation participates in the shared endpoint-loss episode record"
+}
+
 test_housekeeping_defers_to_the_watcher_endpoint_wake() {
   # The watcher's own endpoint-liveness poll already wakes firstmate with a
   # richer message. One lost endpoint must not put two lines in the same digest.
@@ -1986,6 +2090,9 @@ test_classify_signal_reconciliation_respects_escalated_terminal
 test_classify_signal_skips_torn_down_task_files
 test_housekeeping_unreadable_endpoint_escalates
 test_housekeeping_recovered_endpoint_resets_miss_count
+test_housekeeping_miss_count_requires_consecutive_rechecks
+test_housekeeping_declared_pause_resets_miss_count
+test_reconciliation_endpoint_loss_shares_the_episode_record
 test_housekeeping_defers_to_the_watcher_endpoint_wake
 test_classify_stale_dedup_against_signal
 test_pane_input_pending_bordered_idle_not_pending

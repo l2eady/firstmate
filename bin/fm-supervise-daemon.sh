@@ -582,6 +582,9 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   marker="$state/.subsuper-paused-$key"
   watcher_key=$(_stale_key "$win")
   if status_is_paused "$last"; then
+    # A declared pause takes this window off the wedge recheck entirely, so any
+    # endpoint miss run in progress stops being consecutive here.
+    endpoint_miss_reset "$state" "$win"
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
@@ -682,16 +685,23 @@ endpoint_loss_confirmed() {  # <state> <window>
 
 # state/.endpoint-surfaced-<window> is the SHARED per-episode record for a lost
 # endpoint, written by whichever detector confirms the loss first and cleared by
-# the watcher's endpoint_miss_clear as soon as the endpoint reads again. Both
-# detectors run on the same cadence with the same threshold, so which one gets
-# there first is decided by tick phase; the guard only avoids a duplicate digest
-# line if it is symmetric, which means the daemon records the episode too.
+# the watcher's endpoint_miss_clear as soon as the endpoint reads again. THREE
+# detectors can observe one lost endpoint - the watcher's per-poll liveness
+# check, the daemon's stale recheck, and no-verb signal reconciliation - and they
+# run on independent cadences, so which gets there first is a matter of timing.
+# The guard only prevents a duplicate recovery recommendation in one digest if
+# every one of them both reads and writes this record.
 endpoint_already_surfaced() {  # <state> <window>
   [ -e "$1/.endpoint-surfaced-$(_stale_key "$2")" ]
 }
 
 endpoint_mark_surfaced() {  # <state> <window>
   : > "$1/.endpoint-surfaced-$(_stale_key "$2")"
+}
+
+# Resolve the recorded endpoint for a task id, or nothing when it has none.
+task_endpoint() {  # <state> <task>
+  window_for_task "$(_stale_key "$2")" "$1" 2>/dev/null || true
 }
 
 # 0 when the task's CURRENT last status line is captain-relevant and identical to
@@ -713,13 +723,26 @@ reconcile_status_already_escalated() {  # <state> <task>
 # nothing when this task is already covered; the classification and the
 # wake-level fold stay in the library.
 reconcile_task_dedupe_hook() {  # <task> <class> <detail>
-  local task=$1 class=$2 detail=$3 state=${FM_RECONCILE_HOOK_STATE:-}
+  local task=$1 class=$2 detail=$3 state=${FM_RECONCILE_HOOK_STATE:-} win
   [ -n "$state" ] || { printf '%s' "$detail"; return; }
   case "$class" in
-    working|paused) reconcile_seen_clear "$state" "$task"; return ;;
+    working|paused)
+      # Demonstrated liveness ends any endpoint-loss run in progress, so a later
+      # blip cannot land on top of an older one and reach the threshold.
+      reconcile_seen_clear "$state" "$task"
+      win=$(task_endpoint "$state" "$task")
+      [ -n "$win" ] && endpoint_miss_reset "$state" "$win"
+      return ;;
   esac
   reconcile_status_already_escalated "$state" "$task" && return
   reconcile_seen_matches "$state" "$task" "$detail" && return
+  if [ "$class" = endpoint-lost ]; then
+    win=$(task_endpoint "$state" "$task")
+    if [ -n "$win" ]; then
+      endpoint_already_surfaced "$state" "$win" && return
+      endpoint_mark_surfaced "$state" "$win"
+    fi
+  fi
   mark_reconcile_seen "$state" "$task" "$detail"
   printf '%s' "$detail"
 }
@@ -1197,12 +1220,19 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
+    # The miss count means CONSECUTIVE unreadable rechecks, so every tick that
+    # does not actually probe has to end the run. Without this a single old blip
+    # survives a refreshed wedge timer and pairs with an unrelated later blip to
+    # "confirm" a loss for a crew that is alive and still running.
     if [ -n "$last" ] && status_is_paused "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
-    [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
+    if [ "$age" -lt "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ]; then
+      endpoint_miss_reset "$state" "$win"
+      continue
+    fi
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) endpoint_miss_reset "$state" "$win"; rm -f "$marker" ;;
