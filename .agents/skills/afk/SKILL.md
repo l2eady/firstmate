@@ -137,7 +137,7 @@ Classify each wake this way:
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
   This includes the watcher's own endpoint-liveness poll (`check: endpoint <target>: ...`), which fires once per episode after several consecutive unreadable probes of a recorded in-flight endpoint - the orphan the stale layer cannot see, because a dead endpoint produces no pane to hash and no further status or turn-end write.
-  When every recorded endpoint goes unreadable in the same poll it fires as `check: endpoint backend: ...` instead, exactly once: that is the backend being unavailable, not the fleet being lost, so restore the backend and never relaunch individual tasks off it.
+  It reports per task, so a backend outage arrives as one such item per affected task rather than as a single fleet-level verdict; that is deliberate, because guessing "backend outage" from the same shape would suppress a real orphan.
 - `stale` with a terminal status -> escalate. Non-terminal stale is transient:
   record a marker and self-handle. If the pane is still idle past
   `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a

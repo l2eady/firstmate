@@ -394,29 +394,16 @@ surface_nonterminal_stale() {  # <window> <hash>
 # through their existing check handling. A successful capture clears both
 # markers, so a recovered endpoint re-arms.
 #
-# One dead endpoint and an unreachable BACKEND look identical per task, and the
-# consecutive-miss rule cannot tell them apart because a backend outage fails
-# every probe persistently rather than as a blip. So the decision is deferred to
-# the end of the poll, once every recorded window has been probed: misses spread
-# over some windows are per-task endpoint loss, while every recorded window
-# failing at once is the backend itself. That distinction matters because the
-# per-task wording recommends relaunching, and doing that once per in-flight crew
-# during a cmux socket drop or a herdr daemon restart would respawn crews that
-# are still running.
+# The verdict stays deliberately per task. A shared backend outage does fail
+# every probe at once, and inferring that from the misses would collapse those
+# lines into one - but the same shape is also several endpoints genuinely dying,
+# and guessing wrong there suppresses a real orphan, which is the failure this
+# whole check exists to break. One deduplicated actionable item per affected task
+# is the fail-safe reading, so the misses are reported as what was actually
+# observed and the fleet-wide pattern is left for firstmate to recognise across
+# the batch.
 ENDPOINT_MISS_POLLS=${FM_ENDPOINT_MISS_POLLS:-2}
 case "$ENDPOINT_MISS_POLLS" in ''|*[!0-9]*) ENDPOINT_MISS_POLLS=2 ;; esac
-
-ENDPOINT_TOTAL=0
-ENDPOINT_FAILED=0
-ENDPOINT_CONFIRMED=0
-ENDPOINT_PENDING=""
-
-endpoint_poll_reset() {
-  ENDPOINT_TOTAL=0
-  ENDPOINT_FAILED=0
-  ENDPOINT_CONFIRMED=0
-  ENDPOINT_PENDING=""
-}
 
 endpoint_miss_clear() {  # <window>
   local key
@@ -424,47 +411,22 @@ endpoint_miss_clear() {  # <window>
   rm -f "$STATE/.endpoint-miss-$key" "$STATE/.endpoint-surfaced-$key"
 }
 
-# Count one unreadable probe and remember the first window whose loss is
-# confirmed and not yet surfaced. Deliberately does NOT wake: see above.
 endpoint_miss_record() {  # <window> <task> [last-status-line]
-  local win=$1 task=$2 last=${3:-} key n
-  ENDPOINT_FAILED=$((ENDPOINT_FAILED + 1))
+  local win=$1 task=$2 last=${3:-} key n reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   n=$(( $(cat "$STATE/.endpoint-miss-$key" 2>/dev/null || echo 0) + 1 ))
   printf '%s' "$n" > "$STATE/.endpoint-miss-$key"
   [ "$n" -ge "$ENDPOINT_MISS_POLLS" ] || return 0
-  ENDPOINT_CONFIRMED=$((ENDPOINT_CONFIRMED + 1))
   [ -e "$STATE/.endpoint-surfaced-$key" ] && return 0
-  [ -n "$ENDPOINT_PENDING" ] && return 0
-  ENDPOINT_PENDING=$(printf '%s\t%s\t%s\t%s' "$win" "$task" "$n" "$last")
-}
-
-# Decide and surface once the whole poll's windows have been probed. Every wake
-# site here enqueues BEFORE suppressing: a dead endpoint never produces the
-# successful capture that would clear its marker, so writing the marker ahead of
-# a failed append would suppress the orphan permanently.
-endpoint_poll_surface() {
-  local win task n last reason key
-  if [ "$ENDPOINT_TOTAL" -gt 1 ] && [ "$ENDPOINT_FAILED" -eq "$ENDPOINT_TOTAL" ] \
-     && [ "$ENDPOINT_CONFIRMED" -gt 0 ]; then
-    [ -e "$STATE/.endpoint-backend-outage" ] && return 0
-    reason="check: endpoint backend: all $ENDPOINT_TOTAL recorded endpoints became unreadable at once, so the backend itself looks unavailable rather than any one crew being lost; recommended action: restore the backend and re-check, and do NOT relaunch individual tasks until it is readable again - their crews may still be running"
-    fm_wake_append check endpoint-backend "$reason" || exit 1
-    : > "$STATE/.endpoint-backend-outage"
-    wake "$reason"
-    return 0
-  fi
-  rm -f "$STATE/.endpoint-backend-outage"
-  [ -n "$ENDPOINT_PENDING" ] || return 0
-  IFS="$(printf '\t')" read -r win task n last <<EOF
-$ENDPOINT_PENDING
-EOF
-  key=$(printf '%s' "$win" | tr ':/.' '___')
   # Carry what the task last reported. A crew that already reported done and is
   # waiting on a merge has a legitimately closed endpoint, and away mode acts on
   # this digest line itself rather than on any operator prose, so a bare relaunch
   # instruction would be the wrong call for it.
   reason="check: endpoint $win: task ${task:-unknown} endpoint unreadable for $n consecutive polls; last reported: ${last:-no status}; recommended recovery: resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision"
+  # Enqueue BEFORE suppressing, the same ordering every other wake site here
+  # uses. A dead endpoint never produces the successful capture that would clear
+  # this marker, so writing it ahead of a failed append would suppress the
+  # orphan permanently - the exact silence this check exists to break.
   fm_wake_append check "endpoint-$key" "$reason" || exit 1
   : > "$STATE/.endpoint-surfaced-$key"
   wake "$reason"
@@ -662,7 +624,6 @@ EOF
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
-  endpoint_poll_reset
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -678,7 +639,6 @@ EOF
     # DEAD endpoint: a secondmate whose endpoint dies takes its whole subtree
     # unsupervised, and the only other detector is the session-start liveness
     # sweep, which a long away-mode stretch never reaches.
-    ENDPOINT_TOTAL=$((ENDPOINT_TOTAL + 1))
     if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
       endpoint_miss_record "$w" "$task" "$last"
       continue
@@ -824,10 +784,6 @@ EOF
       fi
     fi
   done < <(recorded_windows)
-  # Every recorded window has now been probed, so a per-task loss can be told
-  # apart from a backend outage. A stale wake above exits the poll before this
-  # runs; the miss counters persist, so the next poll decides instead.
-  endpoint_poll_surface
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

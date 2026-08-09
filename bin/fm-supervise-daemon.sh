@@ -699,15 +699,6 @@ endpoint_mark_surfaced() {  # <state> <window>
   : > "$1/.endpoint-surfaced-$(_stale_key "$2")"
 }
 
-# 0 while the watcher has observed every recorded endpoint going unreadable at
-# once, which is the backend being unavailable rather than any one crew being
-# lost. The per-task recovery wording recommends relaunching, so it must not be
-# emitted for a crew that is probably still running behind an unreachable
-# backend; the watcher surfaces that condition once, as itself.
-endpoint_backend_outage() {  # <state>
-  [ -e "$1/.endpoint-backend-outage" ]
-}
-
 # Resolve the recorded endpoint for a task id, or nothing when it has none.
 task_endpoint() {  # <state> <task>
   window_for_task "$(_stale_key "$2")" "$1" 2>/dev/null || true
@@ -1251,11 +1242,7 @@ housekeeping() {  # <state>
          # silently. But stale_window_is_busy concludes that from ONE capture,
          # and one miss is not proof, so confirm it across consecutive rechecks
          # and keep the stale marker until then so the recheck repeats.
-         if endpoint_backend_outage "$state"; then
-           # The backend is unreachable for the whole fleet, so this probe says
-           # nothing about THIS crew. Keep the marker and recheck once it is back.
-           endpoint_miss_reset "$state" "$win"
-         elif endpoint_already_surfaced "$state" "$win"; then
+         if endpoint_already_surfaced "$state" "$win"; then
            endpoint_miss_reset "$state" "$win"
            rm -f "$marker"
          elif endpoint_loss_confirmed "$state" "$win"; then

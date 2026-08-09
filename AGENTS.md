@@ -593,8 +593,7 @@ On wake, in order of cheapness:
 4. `check:` a per-task poll fired (usually a merge, or X mode when enabled); act on it.
    A `check: endpoint <target>:` line is the watcher's own endpoint-liveness poll: that task's recorded endpoint has been unreadable for several consecutive polls, so it can no longer report at all - no status, no turn-end, no stale wake.
    Treat it as an orphaned in-flight task and recover it from its recorded metadata and worktree, or tear it down if the work is already landed; load `stuck-crewmate-recovery` when the crew needs relaunching.
-   A `check: endpoint backend:` line is the fleet-wide form of that poll: every recorded endpoint went unreadable at once, so the backend itself is unavailable and the crews are probably still running.
-   Restore the backend first and never relaunch individual tasks off this line.
+   The poll reports per task, so a backend that goes down takes its whole fleet's endpoints with it and produces one such line per affected task; recognise that pattern across the batch and restore the backend before recovering any of them individually.
 5. `heartbeat:` a heartbeat wake now reaches you only when the watcher's bash fleet-scan caught a captain-relevant status the per-wake path missed (no-change heartbeats are absorbed in bash, never surfaced), so treat it as "something turned up" and review the whole fleet: start with `bin/fm-fleet-view.sh` for the structured overview, use `bin/fm-crew-state.sh <id>` only for targeted follow-up, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then resume the emitted supervision protocol.
    Do not report that the fleet is unchanged.
 
