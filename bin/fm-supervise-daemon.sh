@@ -180,6 +180,9 @@ STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
+# Consecutive unreadable probes before an endpoint is treated as lost. Shares
+# FM_ENDPOINT_MISS_POLLS with the watcher so both detectors apply one threshold.
+ENDPOINT_MISS_POLLS_DEFAULT=2
 # Max time a buffered escalation may sit undelivered before the daemon retries
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
@@ -451,6 +454,12 @@ classify_signal() {  # <reason-after-colon> <state>
       actionable) printf 'escalate|%s' "$reconcile_detail" ;;
       *)          printf 'escalate|uncertain no-verb signal reconciliation: %s' "$reconciliation" ;;
     esac
+  elif [ "$reconcile_class" = actionable ] && [ "$all_seen" = "1" ]; then
+    # A mixed wake whose captain-relevant statuses were ALL already escalated by
+    # the catch-all scan: carry only the coalesced task that still needs
+    # reconciliation. Re-attaching the distilled statuses here would reintroduce
+    # exactly the duplicate the all_seen branch below exists to prevent.
+    printf 'escalate|%s' "$reconcile_detail"
   elif [ "$reconcile_class" = actionable ]; then
     # A mixed wake: escalate the captain-relevant status AND the coalesced task
     # that needs reconciliation, so neither is lost to the other's classification.
@@ -644,6 +653,37 @@ mark_reconcile_seen() {  # <state> <task> <detail>
 
 reconcile_seen_clear() {  # <state> <task>
   rm -f "$(_reconcile_seen_file "$1" "$2")"
+}
+
+# --- endpoint-loss confirmation for the stale recheck -----------------------
+# A single failed capture is never proof of endpoint loss: a backend CLI timeout
+# or a momentarily unreachable server fails the probe for a crew whose pipeline
+# is still running, and acting on that means relaunching live work. The other two
+# endpoint-loss paths already guard this (fm-crew-state.sh re-probes;
+# fm-watch.sh requires consecutive misses), so the stale recheck uses the same
+# consecutive-miss rule with the watcher's own threshold.
+_endpoint_miss_file() {  # <state> <window>
+  printf '%s/.subsuper-endpoint-miss-%s' "$1" "$(_stale_key "$2")"
+}
+
+endpoint_miss_reset() {  # <state> <window>
+  rm -f "$(_endpoint_miss_file "$1" "$2")"
+}
+
+# 0 once this window has been unreadable for enough consecutive rechecks to be
+# treated as lost; 1 below the threshold, meaning keep waiting and recheck.
+endpoint_loss_confirmed() {  # <state> <window>
+  local state=$1 win=$2 f n
+  f=$(_endpoint_miss_file "$state" "$win")
+  n=$(( $(cat "$f" 2>/dev/null || echo 0) + 1 ))
+  printf '%s' "$n" > "$f"
+  [ "$n" -ge "${FM_ENDPOINT_MISS_POLLS:-$ENDPOINT_MISS_POLLS_DEFAULT}" ]
+}
+
+# 0 when the watcher's own endpoint-liveness poll already surfaced this episode
+# for this window, so one lost endpoint never puts two lines in the same digest.
+endpoint_already_surfaced_by_watcher() {  # <state> <window>
+  [ -e "$1/.endpoint-surfaced-$(_stale_key "$2")" ]
 }
 
 # 0 when the task's CURRENT last status line is captain-relevant and identical to
@@ -1157,14 +1197,23 @@ housekeeping() {  # <state>
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
-      0) rm -f "$marker" ;;
+      0) endpoint_miss_reset "$state" "$win"; rm -f "$marker" ;;
       2) # The endpoint became unreadable while a wedge timer was running. The
          # task still has recorded metadata, so it is in flight with nowhere to
          # report from - the orphan shape, not a reason to drop the marker
-         # silently.
-         escalate_add "$state" "task $task endpoint unreadable after ${age}s idle ($win); recommended recovery: resume or relaunch from recorded metadata and worktree, then continue supervision"
-         rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+         # silently. But stale_window_is_busy concludes that from ONE capture,
+         # and one miss is not proof, so confirm it across consecutive rechecks
+         # and keep the stale marker until then so the recheck repeats.
+         if endpoint_already_surfaced_by_watcher "$state" "$win"; then
+           endpoint_miss_reset "$state" "$win"
+           rm -f "$marker"
+         elif endpoint_loss_confirmed "$state" "$win"; then
+           escalate_add "$state" "task $task endpoint unreadable after ${age}s idle ($win); last reported: ${last:-no status}; recommended recovery: resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision"
+           endpoint_miss_reset "$state" "$win"
+           rm -f "$marker"
+         fi ;;
+      *) endpoint_miss_reset "$state" "$win"
+         escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
          stale_marker_remove "$win" "$state" ;;
     esac
   done

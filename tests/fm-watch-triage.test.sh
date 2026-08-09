@@ -568,9 +568,11 @@ test_unreadable_endpoint_surfaces_once_per_episode() {
   dir=$(make_case endpoint-unreadable); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   window="test:fm-orphan-e1"
-  # Recorded in-flight metadata and nothing else: no status file and no turn-end
-  # marker, so no signal wake can fire for this task.
+  # Recorded in-flight metadata plus an already-surfaced status, so no signal
+  # wake can fire for this task and only the endpoint path can reach it.
   printf 'window=%s\nkind=ship\n' "$window" > "$state/orphan-e1.meta"
+  printf 'working: implementing\n' > "$state/orphan-e1.status"
+  printf '%s' "$(seen_sig "$state/orphan-e1.status")" > "$state/.seen-orphan-e1_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
@@ -582,6 +584,8 @@ test_unreadable_endpoint_surfaces_once_per_episode() {
   grep -F "check: endpoint $window" "$out" >/dev/null \
     || fail "watcher did not print the endpoint-liveness wake: $(cat "$out")"
   grep -F "task orphan-e1" "$out" >/dev/null || fail "the endpoint wake did not carry its task id"
+  grep -F "last reported: working: implementing" "$out" >/dev/null \
+    || fail "the endpoint wake did not carry what the task last reported: $(cat "$out")"
   grep -F "recommended recovery:" "$out" >/dev/null || fail "the endpoint wake carried no recovery guidance"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the endpoint wake failed"
   grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "endpoint $window" >/dev/null \
@@ -626,6 +630,56 @@ test_transient_capture_failure_absorbed() {
   [ ! -e "$state/.endpoint-surfaced-$key" ] || fail "a sub-threshold capture failure marked the episode surfaced"
   reap "$pid"
   pass "capture failures below the miss threshold are absorbed and only counted"
+}
+
+test_secondmate_unreadable_endpoint_surfaces() {
+  # A secondmate's IDLE PANE is healthy, which is why stale-pane wakes skip it -
+  # but a DEAD endpoint is a different condition, and it takes the secondmate's
+  # whole subtree unsupervised. The only other detector runs at session start,
+  # which a long away-mode stretch never reaches.
+  local dir state fakebin out window pid
+  dir=$(make_case secondmate-endpoint); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-second-s1"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/second-s1.meta"
+  printf 'working: supervising its own fleet\n' > "$state/second-s1.status"
+  printf '%s' "$(seen_sig "$state/second-s1.status")" > "$state/.seen-second-s1_status"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "a secondmate whose endpoint died was never surfaced"
+  grep -F "check: endpoint $window" "$out" >/dev/null \
+    || fail "the secondmate endpoint wake was not emitted: $(cat "$out")"
+  grep -F "task second-s1" "$out" >/dev/null || fail "the secondmate endpoint wake did not carry its id"
+  pass "a secondmate whose endpoint becomes unreadable is surfaced, while its idle pane stays healthy"
+}
+
+test_secondmate_idle_pane_still_absorbed() {
+  # The pane-staleness exemption must survive the endpoint check: a readable but
+  # unchanging secondmate pane is still healthy and must not wake firstmate.
+  local dir state fakebin out window pane pid
+  dir=$(make_case secondmate-idle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; pane="$dir/pane.txt"
+  window="test:fm-second-s2"
+  printf 'idle, waiting on its own watcher\n' > "$pane"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/second-s2.meta"
+  printf 'working: supervising its own fleet\n' > "$state/second-s2.status"
+  printf '%s' "$(seen_sig "$state/second-s2.status")" > "$state/.seen-second-s2_status"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_STALE_ESCALATE_SECS=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "an idle but readable secondmate pane woke firstmate: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || fail "an idle but readable secondmate pane enqueued a wake"
+  reap "$pid"
+  pass "a readable but unchanging secondmate pane stays absorbed by the stale-pane exemption"
 }
 
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
@@ -1227,6 +1281,8 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_unreadable_endpoint_surfaces_once_per_episode
 test_transient_capture_failure_absorbed
+test_secondmate_unreadable_endpoint_surfaces
+test_secondmate_idle_pane_still_absorbed
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

@@ -402,15 +402,19 @@ endpoint_miss_clear() {  # <window>
   rm -f "$STATE/.endpoint-miss-$key" "$STATE/.endpoint-surfaced-$key"
 }
 
-endpoint_miss_record() {  # <window> <task>
-  local win=$1 task=$2 key n reason
+endpoint_miss_record() {  # <window> <task> [last-status-line]
+  local win=$1 task=$2 last=${3:-} key n reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   n=$(( $(cat "$STATE/.endpoint-miss-$key" 2>/dev/null || echo 0) + 1 ))
   printf '%s' "$n" > "$STATE/.endpoint-miss-$key"
   [ "$n" -ge "$ENDPOINT_MISS_POLLS" ] || return 0
   [ -e "$STATE/.endpoint-surfaced-$key" ] && return 0
   : > "$STATE/.endpoint-surfaced-$key"
-  reason="check: endpoint $win: task ${task:-unknown} endpoint unreadable for $n consecutive polls; recommended recovery: resume or relaunch from recorded metadata and worktree, then continue supervision"
+  # Carry what the task last reported. A crew that already reported done and is
+  # waiting on a merge has a legitimately closed endpoint, and away mode acts on
+  # this digest line itself rather than on any operator prose, so a bare relaunch
+  # instruction would be the wrong call for it.
+  reason="check: endpoint $win: task ${task:-unknown} endpoint unreadable for $n consecutive polls; last reported: ${last:-no status}; recommended recovery: resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision"
   fm_wake_append check "endpoint-$key" "$reason" || exit 1
   wake "$reason"
 }
@@ -617,14 +621,19 @@ EOF
     if ! status_is_paused "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
-    if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
-      continue
-    fi
+    # Endpoint liveness runs BEFORE the secondmate skip. That skip exists because
+    # an idle secondmate PANE is healthy, which is a different condition from a
+    # DEAD endpoint: a secondmate whose endpoint dies takes its whole subtree
+    # unsupervised, and the only other detector is the session-start liveness
+    # sweep, which a long away-mode stretch never reaches.
     if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
-      endpoint_miss_record "$w" "$task"
+      endpoint_miss_record "$w" "$task" "$last"
       continue
     fi
     endpoint_miss_clear "$w"
+    if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
+      continue
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

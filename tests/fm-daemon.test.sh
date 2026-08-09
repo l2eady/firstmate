@@ -951,6 +951,32 @@ test_classify_signal_mixed_wake_reconciles_the_other_task() {
   pass "classify_signal reconciles coalesced tasks the status path does not own"
 }
 
+test_classify_signal_mixed_wake_drops_already_escalated_status() {
+  # The catch-all scan can escalate a coalesced status before the queued wake is
+  # drained. Regression: the mixed-wake branch must then carry ONLY the task that
+  # still needs reconciliation, or the captain gets a second digest entry for a
+  # completion the scan already reported.
+  local dir state fakebin crew_state out key
+  dir=$(make_supercase signal-mixed-seen)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  printf 'done: PR https://x/y/pull/13 checks green\n' > "$state/seen-verb-s1.status"
+  : > "$state/seen-orphan-s2.turn-ended"
+  # The catch-all scan already escalated the status and recorded its marker.
+  key=$(printf '%s' "seen-verb-s1" | tr ':/.' '___')
+  printf 'done: PR https://x/y/pull/13 checks green' > "$state/.subsuper-seen-status-$key"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE_seen_orphan_s2='state: unknown · source: none · backend target gone: sess:fm-seen-orphan-s2 · endpoint: gone' \
+    classify_signal "$state/seen-verb-s1.status $state/seen-orphan-s2.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "the coalesced orphan was lost to the seen status: $out" ;; esac
+  assert_contains "$out" "task seen-orphan-s2 endpoint gone" \
+    "the coalesced orphan was not escalated"
+  assert_not_contains "$out" "PR https://x/y/pull/13" \
+    "an already-escalated completion was re-escalated alongside the orphan"
+  pass "a mixed wake whose statuses were already escalated carries only the unreconciled task"
+}
+
 test_classify_signal_reconciliation_dedup() {
   # The reconciliation escalation path has no status line for the status seen
   # marker to record, so it keeps its own. Regression: an unchanged verdict must
@@ -1059,7 +1085,9 @@ test_classify_signal_skips_torn_down_task_files() {
 
 test_housekeeping_unreadable_endpoint_escalates() {
   # The wedge recheck used to drop its marker when the pane could not be read,
-  # so a crew whose endpoint died while the timer ran was silently dropped.
+  # so a crew whose endpoint died while the timer ran was silently dropped. It
+  # must now escalate - but only after the loss is confirmed across consecutive
+  # rechecks, because one failed capture is a backend round-trip blip, not proof.
   local dir state fakebin key
   dir=$(make_supercase stale-endpoint-unreadable)
   state="$dir/state"; fakebin="$dir/fakebin"
@@ -1068,16 +1096,73 @@ test_housekeeping_unreadable_endpoint_escalates() {
   key=$(printf '%s' "orphan-w9" | tr ':/.' '___')
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
 
+  # First unreadable recheck: not yet proof. Nothing escalated, and the marker is
+  # kept so the recheck repeats instead of dropping the task.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "one failed capture escalated a relaunch recommendation: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "the stale marker was dropped before the loss was confirmed"
 
-  [ -s "$state/.subsuper-escalations" ] || fail "an unreadable endpoint was silently dropped by the stale recheck"
+  # Second consecutive unreadable recheck: now confirmed.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] || fail "a confirmed unreadable endpoint was silently dropped by the stale recheck"
   grep -F 'task orphan-w9 endpoint unreadable' "$state/.subsuper-escalations" >/dev/null \
     || fail "the unreadable-endpoint escalation did not carry its task id"
+  grep -F 'last reported: working: building' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the unreadable-endpoint escalation did not carry what the task last reported"
   grep -F 'recommended recovery:' "$state/.subsuper-escalations" >/dev/null \
     || fail "the unreadable-endpoint escalation carried no recovery guidance"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "the stale marker survived the unreadable-endpoint escalation"
-  pass "housekeeping escalates an in-flight task whose endpoint became unreadable"
+  pass "housekeeping escalates an unreadable endpoint only after consecutive rechecks confirm the loss"
+}
+
+test_housekeeping_recovered_endpoint_resets_miss_count() {
+  # A crew whose pane is readable again clears the miss count, so a later blip
+  # cannot ride on top of an old one and reach the threshold prematurely.
+  local dir state fakebin key wkey pane
+  dir=$(make_supercase stale-endpoint-recovered)
+  state="$dir/state"; fakebin="$dir/fakebin"; pane="$dir/pane.txt"
+  fm_write_meta "$state/blip-w10.meta" "window=sess:fm-blip-w10" "kind=ship"
+  printf 'working: building\n' > "$state/blip-w10.status"
+  printf 'esc to interrupt\n' > "$pane"
+  key=$(printf '%s' "blip-w10" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-blip-w10" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ -e "$state/.subsuper-endpoint-miss-$wkey" ] || fail "the first unreadable recheck recorded no miss count"
+
+  # Pane readable and busy again: the crew is alive, so the miss count resets.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ ! -e "$state/.subsuper-endpoint-miss-$wkey" ] || fail "a recovered endpoint did not reset its miss count"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a recovered endpoint was escalated: $(cat "$state/.subsuper-escalations")"
+  pass "a readable endpoint resets the consecutive-miss count so blips cannot accumulate"
+}
+
+test_housekeeping_defers_to_the_watcher_endpoint_wake() {
+  # The watcher's own endpoint-liveness poll already wakes firstmate with a
+  # richer message. One lost endpoint must not put two lines in the same digest.
+  local dir state fakebin key wkey
+  dir=$(make_supercase stale-endpoint-already-surfaced)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/dup-w11.meta" "window=sess:fm-dup-w11" "kind=ship"
+  printf 'working: building\n' > "$state/dup-w11.status"
+  key=$(printf '%s' "dup-w11" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-dup-w11" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  : > "$state/.endpoint-surfaced-$wkey"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "the stale recheck duplicated an endpoint loss the watcher already surfaced: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "the stale marker was left behind after deferring to the watcher"
+  pass "the stale recheck defers to an endpoint loss the watcher already surfaced"
 }
 
 test_classify_stale_dedup_against_signal() {
@@ -1890,10 +1975,13 @@ test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
 test_classify_signal_mixed_wake_reconciles_the_other_task
+test_classify_signal_mixed_wake_drops_already_escalated_status
 test_classify_signal_reconciliation_dedup
 test_classify_signal_reconciliation_respects_escalated_terminal
 test_classify_signal_skips_torn_down_task_files
 test_housekeeping_unreadable_endpoint_escalates
+test_housekeeping_recovered_endpoint_resets_miss_count
+test_housekeeping_defers_to_the_watcher_endpoint_wake
 test_classify_stale_dedup_against_signal
 test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending
