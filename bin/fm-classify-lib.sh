@@ -213,18 +213,27 @@ crew_is_paused() {  # <id>
 # crew_state_endpoint_lost predicate that picks the endpoint-lost class, so the
 # prose and the class can never disagree about what this line reports.
 signal_reconciliation_detail() {  # <id> <state-line> <turn-end|status-signal>
-  local task=$1 line=$2 context=$3 state phrase
+  local task=$1 line=$2 context=$3 state phrase last
+  # "no terminal status" is a claim about the TASK, not about which files the
+  # wake happened to name, so it has to be read from the status log. A crew that
+  # reported done before the daemon started has no seen-status marker yet, and
+  # asserting it never reported would point away mode at relaunching finished
+  # work.
+  last=$(last_status_line "${STATE:-${FM_STATE_OVERRIDE:-}}/$task.status")
   if [ "$context" = turn-end ]; then
-    phrase='after turn end with no terminal status'
+    phrase='after turn end'
   else
-    phrase='after a no-verb status wake without a terminal status'
+    phrase='after a no-verb status wake'
+  fi
+  if [ -z "$last" ] || ! status_is_captain_relevant "$last"; then
+    phrase="$phrase with no terminal status"
   fi
   state=${line#state: }; state=${state%% *}
   # Endpoint loss outranks everything: it is the one fact that makes the rest of
   # the read unreliable, whatever state it reports.
   if crew_state_endpoint_lost "$line"; then
-    printf 'task %s endpoint gone %s (%s); recommended recovery: resume or relaunch from recorded metadata and worktree, then continue supervision' \
-      "$task" "$phrase" "${line:-state unreadable}"
+    printf 'task %s endpoint gone %s (%s); last reported: %s; recommended recovery: resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision' \
+      "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
     return
   fi
   case "$line" in

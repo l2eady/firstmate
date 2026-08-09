@@ -404,6 +404,16 @@ surface_nonterminal_stale() {  # <window> <hash>
 # the batch.
 ENDPOINT_MISS_POLLS=${FM_ENDPOINT_MISS_POLLS:-2}
 case "$ENDPOINT_MISS_POLLS" in ''|*[!0-9]*) ENDPOINT_MISS_POLLS=2 ;; esac
+# How recent the previous miss must be to still count as the same run. A poll
+# does not necessarily probe every window: any wake exits the process, so every
+# window after it goes unprobed, and under afk a queued signal skips the window
+# loop entirely. A count with no recency check would therefore let one transient
+# blip sit for hours and pair with an unrelated later one to "confirm" a loss for
+# a crew that is alive - so each miss records when it happened, and a gap wider
+# than a few polls starts the run over.
+ENDPOINT_MISS_GAP=${FM_ENDPOINT_MISS_GAP:-$(( POLL * 3 ))}
+case "$ENDPOINT_MISS_GAP" in ''|*[!0-9]*) ENDPOINT_MISS_GAP=$(( POLL * 3 )) ;; esac
+[ "$ENDPOINT_MISS_GAP" -ge 3 ] || ENDPOINT_MISS_GAP=3
 
 endpoint_miss_clear() {  # <window>
   local key
@@ -411,18 +421,33 @@ endpoint_miss_clear() {  # <window>
   rm -f "$STATE/.endpoint-miss-$key" "$STATE/.endpoint-surfaced-$key"
 }
 
-endpoint_miss_record() {  # <window> <task> [last-status-line]
-  local win=$1 task=$2 last=${3:-} key n reason
+endpoint_miss_record() {  # <window> <task> [last-status-line] [kind]
+  local win=$1 task=$2 last=${3:-} kind=${4:-} key n prev prev_at now reason recovery
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  n=$(( $(cat "$STATE/.endpoint-miss-$key" 2>/dev/null || echo 0) + 1 ))
-  printf '%s' "$n" > "$STATE/.endpoint-miss-$key"
+  now=$(date +%s)
+  n=0
+  if [ -r "$STATE/.endpoint-miss-$key" ]; then
+    read -r prev prev_at < "$STATE/.endpoint-miss-$key" || true
+    case "${prev:-}" in ''|*[!0-9]*) prev=0 ;; esac
+    case "${prev_at:-}" in ''|*[!0-9]*) prev_at=0 ;; esac
+    [ "$(( now - prev_at ))" -le "$ENDPOINT_MISS_GAP" ] && n=$prev
+  fi
+  n=$(( n + 1 ))
+  printf '%s %s' "$n" "$now" > "$STATE/.endpoint-miss-$key"
   [ "$n" -ge "$ENDPOINT_MISS_POLLS" ] || return 0
   [ -e "$STATE/.endpoint-surfaced-$key" ] && return 0
+  # A secondmate has no task worktree: it is recovered by relaunching in its own
+  # firstmate home, so naming a worktree would send away mode at the wrong thing.
+  if [ "$kind" = secondmate ]; then
+    recovery='relaunch it in its recorded firstmate home, then continue supervision'
+  else
+    recovery='resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision'
+  fi
   # Carry what the task last reported. A crew that already reported done and is
   # waiting on a merge has a legitimately closed endpoint, and away mode acts on
   # this digest line itself rather than on any operator prose, so a bare relaunch
   # instruction would be the wrong call for it.
-  reason="check: endpoint $win: task ${task:-unknown} endpoint unreadable for $n consecutive polls; last reported: ${last:-no status}; recommended recovery: resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision"
+  reason="check: endpoint $win: task ${task:-unknown} endpoint unreadable for $n consecutive polls; last reported: ${last:-no status}; recommended recovery: $recovery"
   # Enqueue BEFORE suppressing, the same ordering every other wake site here
   # uses. A dead endpoint never produces the successful capture that would clear
   # this marker, so writing it ahead of a failed append would suppress the
@@ -640,7 +665,7 @@ EOF
     # unsupervised, and the only other detector is the session-start liveness
     # sweep, which a long away-mode stretch never reaches.
     if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
-      endpoint_miss_record "$w" "$task" "$last"
+      endpoint_miss_record "$w" "$task" "$last" "$kind"
       continue
     fi
     endpoint_miss_clear "$w"

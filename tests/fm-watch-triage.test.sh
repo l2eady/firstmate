@@ -310,6 +310,40 @@ test_signal_reconciliation_detail_precedence() {
   pass "signal_reconciliation_detail ranks endpoint loss over state, and state over source"
 }
 
+# "no terminal status" is a claim about the TASK, so it has to come from the
+# status log rather than from which files the wake happened to name. A crew that
+# reported done before the daemon started has no seen-status marker yet, and
+# telling away mode it never reported points at relaunching finished work.
+test_signal_reconciliation_detail_reads_the_status_log() {
+  local dir state out
+  dir=$(make_case reconcile-detail-status); state="$dir/state"
+  printf 'working: building\ndone: PR https://x/y/pull/21 checks green\n' > "$state/rep-r5.status"
+
+  out=$(FM_STATE_OVERRIDE="$state" signal_reconciliation_detail rep-r5 \
+    'state: unknown · source: none · backend target gone: sess:fm-rep-r5 · endpoint: gone' turn-end)
+  case "$out" in
+    *'with no terminal status'*) fail "a crew that already reported done was described as having none: $out" ;;
+  esac
+  case "$out" in
+    *'last reported: done: PR https://x/y/pull/21 checks green'*) ;;
+    *) fail "the endpoint-loss detail carried no last-reported context: $out" ;;
+  esac
+  case "$out" in
+    *'unless that last report shows the work already landed'*) ;;
+    *) fail "the endpoint-loss detail lost its already-landed hedge: $out" ;;
+  esac
+
+  # A crew that genuinely never reported a terminal keeps the claim.
+  printf 'working: building\n' > "$state/rep-r6.status"
+  out=$(FM_STATE_OVERRIDE="$state" signal_reconciliation_detail rep-r6 \
+    'state: unknown · source: none · backend target gone: sess:fm-rep-r6 · endpoint: gone' turn-end)
+  case "$out" in
+    *'after turn end with no terminal status'*) ;;
+    *) fail "a crew with no terminal status lost that context: $out" ;;
+  esac
+  pass "signal_reconciliation_detail takes the terminal-status claim from the status log, not the wake's file list"
+}
+
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
 
 test_provably_working_signal_absorbed() {
@@ -661,12 +695,83 @@ test_transient_capture_failure_absorbed() {
   if ! wait_live "$pid" 30; then
     reap "$pid"; fail "a capture failure below the miss threshold woke firstmate: $(cat "$out")"
   fi
-  misses=$(cat "$state/.endpoint-miss-$key" 2>/dev/null || echo 0)
+  # The miss marker is "<count> <epoch of that miss>"; the epoch is what makes
+  # the run consecutive rather than cumulative.
+  misses=$(cut -d' ' -f1 "$state/.endpoint-miss-$key" 2>/dev/null || echo 0)
   [ "$misses" -ge 2 ] || fail "consecutive probe misses were not accumulated (got '$misses')"
   [ ! -s "$state/.wake-queue" ] || fail "a sub-threshold capture failure enqueued a durable wake"
   [ ! -e "$state/.endpoint-surfaced-$key" ] || fail "a sub-threshold capture failure marked the episode surfaced"
   reap "$pid"
   pass "capture failures below the miss threshold are absorbed and only counted"
+}
+
+test_stale_miss_does_not_pair_with_a_later_blip() {
+  # A poll does not necessarily probe every window - any wake exits the process,
+  # and under afk a queued signal skips the window loop entirely - so a bare
+  # count would let one old transient blip pair with an unrelated later one and
+  # "confirm" a loss for a crew that is alive. Only back-to-back misses count.
+  local dir state fakebin out window key pid misses
+  dir=$(make_case endpoint-stale-miss); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-blip-e4"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/blip-e4.meta"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # An old run left behind by polls that were interrupted before probing this
+  # window, in the count-only form a cumulative counter writes. It carries no
+  # evidence of being recent, so it must not continue into this poll's run.
+  printf '5' > "$state/.endpoint-miss-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=99 FM_ENDPOINT_MISS_GAP=3 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 20; then
+    reap "$pid"; fail "the sub-threshold run woke firstmate: $(cat "$out")"
+  fi
+  misses=$(cut -d' ' -f1 "$state/.endpoint-miss-$key" 2>/dev/null || echo 0)
+  [ "$misses" -ge 1 ] || fail "the fresh miss was not recorded (got '$misses')"
+  [ "$misses" -lt 5 ] \
+    || fail "an hour-old miss run was carried forward instead of restarting (got '$misses')"
+  reap "$pid"
+  rm -f "$state/.endpoint-miss-$key"
+
+  # Back-to-back misses within the window still confirm the loss.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=2 FM_ENDPOINT_MISS_GAP=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch2.out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "consecutive misses no longer confirm a lost endpoint"
+  grep -F "check: endpoint $window" "$dir/watch2.out" >/dev/null \
+    || fail "the confirmed loss was not surfaced: $(cat "$dir/watch2.out")"
+  pass "an old miss cannot pair with a later blip, while back-to-back misses still confirm"
+}
+
+test_secondmate_endpoint_wake_names_its_home() {
+  # A secondmate has no task worktree: it is recovered by relaunching in its own
+  # firstmate home, so the crewmate wording would send away mode at the wrong
+  # artifact.
+  local dir state fakebin out window pid
+  dir=$(make_case endpoint-secondmate-wording); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-second-s3"
+  printf 'window=%s\nkind=secondmate\nhome=%s\n' "$window" "$dir/home" > "$state/second-s3.meta"
+  printf 'working: supervising its own fleet\n' > "$state/second-s3.status"
+  printf '%s' "$(seen_sig "$state/second-s3.status")" > "$state/.seen-second-s3_status"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "a dead secondmate endpoint was never surfaced"
+  grep -F "task second-s3" "$out" >/dev/null || fail "the secondmate endpoint wake lost its id"
+  grep -F "relaunch it in its recorded firstmate home" "$out" >/dev/null \
+    || fail "the secondmate endpoint wake gave crewmate recovery wording: $(cat "$out")"
+  grep -F "worktree" "$out" >/dev/null \
+    && fail "the secondmate endpoint wake named a worktree it does not have: $(cat "$out")"
+  pass "a dead secondmate endpoint is recovered by its home, not by a worktree it has no notion of"
 }
 
 test_every_lost_endpoint_surfaces_independently() {
@@ -1396,6 +1501,7 @@ test_status_is_paused_classifier
 test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
 test_signal_reconciliation_detail_precedence
+test_signal_reconciliation_detail_reads_the_status_log
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
@@ -1409,6 +1515,8 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_unreadable_endpoint_surfaces_once_per_episode
 test_transient_capture_failure_absorbed
+test_stale_miss_does_not_pair_with_a_later_blip
+test_secondmate_endpoint_wake_names_its_home
 test_every_lost_endpoint_surfaces_independently
 test_endpoint_wake_not_suppressed_when_the_queue_append_fails
 test_secondmate_unreadable_endpoint_surfaces
