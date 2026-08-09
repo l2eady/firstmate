@@ -995,6 +995,91 @@ test_classify_signal_reconciliation_dedup() {
   pass "classify_signal deduplicates unchanged reconciliation verdicts without swallowing recurrences"
 }
 
+test_classify_signal_reconciliation_respects_escalated_terminal() {
+  # A crew that reported done keeps ending turns (monitor-until-merge) and
+  # eventually closes its endpoint. Regression: those later bare turn-ends must
+  # not re-tell the captain about the completion the status path already
+  # escalated, and must resume surfacing once the crew's status moves on.
+  local dir state fakebin crew_state out key
+  dir=$(make_supercase signal-terminal-reconcile)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  key=$(printf '%s' "term-t3" | tr ':/.' '___')
+  printf 'done: PR https://x/y/pull/12 checks green\n' > "$state/term-t3.status"
+  : > "$state/term-t3.turn-ended"
+
+  # Wake 1: the status path escalates and records the seen marker.
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · outcome: checks-passed' \
+    classify_signal "$state/term-t3.status" "$state")
+  case "$out" in escalate\|*) ;; *) fail "terminal status did not escalate: $out" ;; esac
+  FM_STATE_OVERRIDE="$state" mark_escalated_seen signal "$state/term-t3.status" "$state"
+
+  # Wake 2: a bare turn-end for the same, unchanged completion.
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · outcome: checks-passed' \
+    classify_signal "$state/term-t3.turn-ended" "$state")
+  case "$out" in self\|*) ;; *) fail "an already-escalated completion was re-escalated by reconciliation: $out" ;; esac
+  [ ! -e "$state/.subsuper-seen-reconcile-$key" ] \
+    || fail "an already-covered task recorded a reconciliation marker"
+
+  # The crew's status moves on: reconciliation must surface again.
+  printf 'done: PR https://x/y/pull/12 checks green\nworking: applying review fixes\n' > "$state/term-t3.status"
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-term-t3 · endpoint: gone' \
+    classify_signal "$state/term-t3.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "a lost endpoint after the status moved on was suppressed: $out" ;; esac
+  assert_contains "$out" "task term-t3 endpoint gone" "the resumed escalation lost its recovery detail"
+  pass "reconciliation defers to an already-escalated terminal status without swallowing later divergence"
+}
+
+test_classify_signal_skips_torn_down_task_files() {
+  # A wake queued just before teardown names paths that no longer exist.
+  # Regression: deliberately finished work must not be escalated as an orphan
+  # needing metadata recovery.
+  local dir state fakebin crew_state out
+  dir=$(make_supercase signal-torn-down)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no metadata for gone-d4' \
+    classify_signal "$state/gone-d4.turn-ended" "$state")
+  case "$out" in self\|*) ;; *) fail "a torn-down task's vanished wake was escalated: $out" ;; esac
+  assert_not_contains "$out" "recommended recovery:" "a torn-down task produced a recovery recommendation"
+
+  # A file that still exists is still reconciled.
+  : > "$state/live-d5.turn-ended"
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-live-d5 · endpoint: gone' \
+    classify_signal "$state/live-d5.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "an existing orphan turn-end stopped escalating: $out" ;; esac
+  pass "classify_signal skips wake files removed by teardown while still reconciling live ones"
+}
+
+test_housekeeping_unreadable_endpoint_escalates() {
+  # The wedge recheck used to drop its marker when the pane could not be read,
+  # so a crew whose endpoint died while the timer ran was silently dropped.
+  local dir state fakebin key
+  dir=$(make_supercase stale-endpoint-unreadable)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/orphan-w9.meta" "window=sess:fm-orphan-w9" "kind=ship"
+  printf 'working: building\n' > "$state/orphan-w9.status"
+  key=$(printf '%s' "orphan-w9" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+
+  [ -s "$state/.subsuper-escalations" ] || fail "an unreadable endpoint was silently dropped by the stale recheck"
+  grep -F 'task orphan-w9 endpoint unreadable' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the unreadable-endpoint escalation did not carry its task id"
+  grep -F 'recommended recovery:' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the unreadable-endpoint escalation carried no recovery guidance"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "the stale marker survived the unreadable-endpoint escalation"
+  pass "housekeeping escalates an in-flight task whose endpoint became unreadable"
+}
+
 test_classify_stale_dedup_against_signal() {
   # If the signal path already escalated a status (seen marker matches),
   # classify_stale must self-handle to avoid a duplicate in the digest.
@@ -1806,6 +1891,9 @@ test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
 test_classify_signal_mixed_wake_reconciles_the_other_task
 test_classify_signal_reconciliation_dedup
+test_classify_signal_reconciliation_respects_escalated_terminal
+test_classify_signal_skips_torn_down_task_files
+test_housekeeping_unreadable_endpoint_escalates
 test_classify_stale_dedup_against_signal
 test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending

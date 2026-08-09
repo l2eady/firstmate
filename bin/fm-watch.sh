@@ -378,6 +378,43 @@ surface_nonterminal_stale() {  # <window> <hash>
   wake "stale: $win"
 }
 
+# Endpoint liveness. The stale layer needs a readable pane to hash, so a crew
+# whose endpoint DIES is invisible to it: the harness turn-end hook never runs,
+# so no status line and no turn-end marker are ever written again, no signal wake
+# fires, and the heartbeat backstop only scans captain-relevant statuses. Such a
+# task would sit in flight forever with nothing escalated. The per-poll loop
+# below already holds the recorded endpoint and knows the probe failed, so that
+# is where the condition is caught.
+#
+# A single failed probe is not proof (a backend CLI timeout, or an unreachable
+# tmux server failing every task at once), so it takes ENDPOINT_MISS_POLLS
+# consecutive misses. It then surfaces ONCE per episode as a per-task poll -
+# exactly what the `check:` vocabulary already means ("print only when firstmate
+# should wake"), so no new wake kind is needed and both supervisors route it
+# through their existing check handling. A successful capture clears both
+# markers, so a recovered endpoint re-arms.
+ENDPOINT_MISS_POLLS=${FM_ENDPOINT_MISS_POLLS:-2}
+case "$ENDPOINT_MISS_POLLS" in ''|*[!0-9]*) ENDPOINT_MISS_POLLS=2 ;; esac
+
+endpoint_miss_clear() {  # <window>
+  local key
+  key=$(printf '%s' "$1" | tr ':/.' '___')
+  rm -f "$STATE/.endpoint-miss-$key" "$STATE/.endpoint-surfaced-$key"
+}
+
+endpoint_miss_record() {  # <window> <task>
+  local win=$1 task=$2 key n reason
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  n=$(( $(cat "$STATE/.endpoint-miss-$key" 2>/dev/null || echo 0) + 1 ))
+  printf '%s' "$n" > "$STATE/.endpoint-miss-$key"
+  [ "$n" -ge "$ENDPOINT_MISS_POLLS" ] || return 0
+  [ -e "$STATE/.endpoint-surfaced-$key" ] && return 0
+  : > "$STATE/.endpoint-surfaced-$key"
+  reason="check: endpoint $win: task ${task:-unknown} endpoint unreadable for $n consecutive polls; recommended recovery: resume or relaunch from recorded metadata and worktree, then continue supervision"
+  fm_wake_append check "endpoint-$key" "$reason" || exit 1
+  wake "$reason"
+}
+
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
@@ -583,7 +620,11 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      endpoint_miss_record "$w" "$task"
+      continue
+    fi
+    endpoint_miss_clear "$w"
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

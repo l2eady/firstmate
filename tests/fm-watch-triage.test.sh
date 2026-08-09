@@ -556,6 +556,78 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# --- endpoint liveness: an endpoint that dies without ever signalling again ----
+# The 2026-08-10 orphan. When a crew's endpoint dies mid-turn the harness turn-end
+# hook never runs, so no status line and no turn-end marker are ever written
+# again: no signal wake fires, the stale layer has no pane to hash, and the
+# heartbeat backstop only scans captain-relevant statuses. The task would stay in
+# flight forever with nothing escalated.
+
+test_unreadable_endpoint_surfaces_once_per_episode() {
+  local dir state fakebin out drain_out window key pid
+  dir=$(make_case endpoint-unreadable); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="test:fm-orphan-e1"
+  # Recorded in-flight metadata and nothing else: no status file and no turn-end
+  # marker, so no signal wake can fire for this task.
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/orphan-e1.meta"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "watcher never surfaced a recorded endpoint that stayed unreadable"
+  grep -F "check: endpoint $window" "$out" >/dev/null \
+    || fail "watcher did not print the endpoint-liveness wake: $(cat "$out")"
+  grep -F "task orphan-e1" "$out" >/dev/null || fail "the endpoint wake did not carry its task id"
+  grep -F "recommended recovery:" "$out" >/dev/null || fail "the endpoint wake carried no recovery guidance"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the endpoint wake failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "endpoint $window" >/dev/null \
+    || fail "the endpoint wake was not durably queued"
+  [ -e "$state/.endpoint-surfaced-$key" ] || fail "the episode marker was not recorded"
+
+  # Same unreadable endpoint on later polls: already surfaced, so no second wake.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch2.out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an already-surfaced unreadable endpoint woke firstmate again: $(cat "$dir/watch2.out")"
+  fi
+  reap "$pid"
+  pass "a recorded endpoint that stays unreadable surfaces once per episode with its task id and recovery guidance"
+}
+
+test_transient_capture_failure_absorbed() {
+  # One (or a few) failed probes are not proof: a backend CLI timeout or a
+  # momentarily unreachable server fails every task at once. Below the threshold
+  # the watcher must keep working without waking firstmate.
+  local dir state fakebin out window key pid misses
+  dir=$(make_case endpoint-transient); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-blip-e2"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/blip-e2.meta"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=99 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a capture failure below the miss threshold woke firstmate: $(cat "$out")"
+  fi
+  misses=$(cat "$state/.endpoint-miss-$key" 2>/dev/null || echo 0)
+  [ "$misses" -ge 2 ] || fail "consecutive probe misses were not accumulated (got '$misses')"
+  [ ! -s "$state/.wake-queue" ] || fail "a sub-threshold capture failure enqueued a durable wake"
+  [ ! -e "$state/.endpoint-surfaced-$key" ] || fail "a sub-threshold capture failure marked the episode surfaced"
+  reap "$pid"
+  pass "capture failures below the miss threshold are absorbed and only counted"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -1153,6 +1225,8 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
+test_unreadable_endpoint_surfaces_once_per_episode
+test_transient_capture_failure_absorbed
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

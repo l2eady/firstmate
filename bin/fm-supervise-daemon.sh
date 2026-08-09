@@ -381,7 +381,7 @@ discover_supervisor_backend() {
 # summary firstmate would otherwise have to re-read.
 
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
+  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen resolvable=""
   local reconciliation reconcile_class reconcile_detail
   local -a signal_files rel_tasks unhandled
   read -r -a signal_files <<<"$reason"
@@ -412,10 +412,15 @@ classify_signal() {  # <reason-after-colon> <state>
   # stopped or endpoint-gone crew rides along silently on someone else's verb
   # (its .seen-* signature already advanced, a gone endpoint produces no stale
   # wake, and the catch-all scan only looks at captain-relevant statuses).
+  # A wake enqueued just before its task was torn down still names paths that no
+  # longer exist; reconciling those would recommend recovering work that was
+  # deliberately finished. Mirror the captain-relevant loop's existence guard.
   unhandled=()
   for f in "${signal_files[@]}"; do
     task=$(signal_file_task "$f")
     [ -n "$task" ] || continue
+    resolvable=1
+    [ -e "$f" ] || continue
     case " ${rel_tasks[*]-} " in *" $task "*) continue ;; esac
     unhandled+=("$f")
   done
@@ -427,6 +432,11 @@ classify_signal() {  # <reason-after-colon> <state>
     reconciliation=$(signal_reconciliation_decision "$state" "${unhandled[@]}")
   elif [ -n "$rel" ]; then
     reconciliation='none|every referenced task is handled by the status path'
+  elif [ -n "$resolvable" ]; then
+    # The wake named real task files that no longer exist: the task was torn
+    # down between enqueue and handling. Deliberately finished work is not an
+    # orphan to recover.
+    reconciliation='vanished|task state was removed after the wake was queued (torn down); nothing left in flight to reconcile'
   else
     reconciliation='actionable|signal did not resolve a task; recommended action: inspect the queued wake and reconcile its task metadata'
   fi
@@ -437,6 +447,7 @@ classify_signal() {  # <reason-after-colon> <state>
       working)    printf 'self|routine signal: %s (%s)' "$distilled" "$reconcile_detail" ;;
       paused)     printf 'self|declared external pause: %s' "$reconcile_detail" ;;
       seen)       printf 'self|reconciliation already escalated: %s' "$reconcile_detail" ;;
+      vanished)   printf 'self|%s' "$reconcile_detail" ;;
       actionable) printf 'escalate|%s' "$reconcile_detail" ;;
       *)          printf 'escalate|uncertain no-verb signal reconciliation: %s' "$reconciliation" ;;
     esac
@@ -635,47 +646,43 @@ reconcile_seen_clear() {  # <state> <task>
   rm -f "$(_reconcile_seen_file "$1" "$2")"
 }
 
+# 0 when the task's CURRENT last status line is captain-relevant and identical to
+# the line the status path already escalated. Reconciliation of such a task adds
+# nothing: the captain was already told about that terminal, and a crew that
+# reports done keeps ending turns (the monitor-until-merge phase) and eventually
+# closes its endpoint, both of which reconcile as actionable. Without this, every
+# escalated completion produced a second digest entry for the same event.
+reconcile_status_already_escalated() {  # <state> <task>
+  local state=$1 task=$2 last
+  last=$(last_status_line "$state/$task.status")
+  [ -n "$last" ] || return 1
+  status_is_captain_relevant "$last" || return 1
+  [ "$(cat "$state/.subsuper-seen-status-$(_stale_key "$task")" 2>/dev/null || true)" = "$last" ]
+}
+
+# The dedupe seam bin/fm-classify-lib.sh's signal_crew_reconciliation calls per
+# task. It performs marker bookkeeping only and prints the detail to carry, or
+# nothing when this task is already covered; the classification and the
+# wake-level fold stay in the library.
+reconcile_task_dedupe_hook() {  # <task> <class> <detail>
+  local task=$1 class=$2 detail=$3 state=${FM_RECONCILE_HOOK_STATE:-}
+  [ -n "$state" ] || { printf '%s' "$detail"; return; }
+  case "$class" in
+    working|paused) reconcile_seen_clear "$state" "$task"; return ;;
+  esac
+  reconcile_status_already_escalated "$state" "$task" && return
+  reconcile_seen_matches "$state" "$task" "$detail" && return
+  mark_reconcile_seen "$state" "$task" "$detail"
+  printf '%s' "$detail"
+}
+
 # Reconcile the tasks a wake references that the status path does not already
-# own, applying the per-task dedupe above. Classification itself stays in
-# bin/fm-classify-lib.sh (crew_signal_reconciliation); this only layers the
-# daemon's digest-dedupe concern on top. Prints "<class>|<detail>":
-#   working|...    every task has positive active-work evidence
-#   paused|...     absorbable, at least one declared external pause
-#   seen|...       actionable, but every detail was already escalated
-#   actionable|... at least one NEW actionable task, with recovery guidance
+# own. The verdict comes from the library's single fold; this only supplies the
+# daemon's digest-dedupe bookkeeping through its hook.
 signal_reconciliation_decision() {  # <state> <file> ...
   local state=$1; shift
-  local task context rec class detail resolved="" fresh="" repeat="" overall=working
-  while IFS="$(printf '\t')" read -r task context; do
-    [ -n "$task" ] || continue
-    resolved=1
-    rec=$(crew_signal_reconciliation "$task" "$context")
-    class=${rec%%|*}; detail=${rec#*|}
-    case "$class" in
-      working)
-        reconcile_seen_clear "$state" "$task" ;;
-      paused)
-        reconcile_seen_clear "$state" "$task"
-        [ "$overall" = actionable ] || overall=paused ;;
-      *)
-        overall=actionable
-        if reconcile_seen_matches "$state" "$task" "$detail"; then
-          repeat="${repeat}${repeat:+ | }${detail}"
-        else
-          mark_reconcile_seen "$state" "$task" "$detail"
-          fresh="${fresh}${fresh:+ | }${detail}"
-        fi ;;
-    esac
-  done <<<"$(signal_wake_tasks "$@")"
-  if [ -z "$resolved" ]; then
-    printf 'actionable|signal did not resolve a task; recommended action: inspect the queued wake and reconcile its task metadata'
-    return
-  fi
-  case "$overall" in
-    working) printf 'working|all referenced tasks are provably working' ;;
-    paused)  printf 'paused|all referenced tasks are working or in a declared external pause' ;;
-    *)       if [ -n "$fresh" ]; then printf 'actionable|%s' "$fresh"; else printf 'seen|%s' "$repeat"; fi ;;
-  esac
+  FM_RECONCILE_HOOK_STATE="$state" FM_RECONCILE_TASK_HOOK=reconcile_task_dedupe_hook \
+    signal_crew_reconciliation "$@"
 }
 
 # Mark every captain-relevant status line a per-wake classification escalated as
@@ -1151,7 +1158,12 @@ housekeeping() {  # <state>
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
+      2) # The endpoint became unreadable while a wedge timer was running. The
+         # task still has recorded metadata, so it is in flight with nowhere to
+         # report from - the orphan shape, not a reason to drop the marker
+         # silently.
+         escalate_add "$state" "task $task endpoint unreadable after ${age}s idle ($win); recommended recovery: resume or relaunch from recorded metadata and worktree, then continue supervision"
+         rm -f "$marker" ;;
       *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
          stale_marker_remove "$win" "$state" ;;
     esac

@@ -318,15 +318,26 @@ crew_signal_reconciliation() {  # <task> [turn-end|status-signal]
 }
 
 # Reconcile every unique task referenced by a no-verb signal using exactly one
-# fm-crew-state.sh read per task. Prints one decision record:
+# fm-crew-state.sh read per task. This is the ONE fold from per-task decisions
+# onto a wake-level verdict; every consumer goes through it rather than keeping
+# its own copy of the precedence rule. Prints one decision record:
 #   working|...    every task has positive active-work evidence, or is gone;
 #   paused|...     every task is absorbable and at least one is deliberately paused;
-#   actionable|... at least one task stopped, lost its endpoint, or is uncertain.
+#   actionable|... at least one task stopped, lost its endpoint, or is uncertain;
+#   seen|...       actionable, but the caller's hook reported every detail already
+#                  covered, so there is nothing new to surface.
 # The actionable detail includes each affected task id and the recommended next
 # step so away-mode batching can surface a useful recovery instruction without a
 # second live-state read.
+#
+# FM_RECONCILE_TASK_HOOK is the caller's bookkeeping seam: when set to a function
+# name it is invoked as `<hook> <task> <class> <detail>` for every reconciled
+# task, and its stdout replaces the detail carried for an actionable task. Empty
+# stdout means the caller already covered that task (its own dedupe), which is
+# what turns an all-covered verdict into `seen`. The hook owns persistence only;
+# the classification and the fold stay here.
 signal_crew_reconciliation() {  # <file> ...
-  local task context rec class detail seen="" details="" overall=working
+  local task context rec class detail hooked seen="" details="" covered="" overall=working
   while IFS="$(printf '\t')" read -r task context; do
     [ -n "$task" ] || continue
     seen="$seen $task"
@@ -335,10 +346,21 @@ signal_crew_reconciliation() {  # <file> ...
     if task_is_orphan "$(signal_task_state_dir "$task" "$@")" "$task"; then continue; fi
     rec=$(crew_signal_reconciliation "$task" "$context")
     class=${rec%%|*}; detail=${rec#*|}
+    if [ -n "${FM_RECONCILE_TASK_HOOK:-}" ]; then
+      hooked=$("$FM_RECONCILE_TASK_HOOK" "$task" "$class" "$detail")
+    else
+      hooked=$detail
+    fi
     case "$class" in
       working) ;;
       paused)  [ "$overall" = actionable ] || overall=paused ;;
-      *)       overall=actionable; details="${details}${details:+ | }${detail}" ;;
+      *)
+        overall=actionable
+        if [ -n "$hooked" ]; then
+          details="${details}${details:+ | }${hooked}"
+        else
+          covered="${covered}${covered:+ | }${detail}"
+        fi ;;
     esac
   done <<<"$(signal_wake_tasks "$@")"
   if [ -z "$seen" ]; then
@@ -348,7 +370,8 @@ signal_crew_reconciliation() {  # <file> ...
   case "$overall" in
     working) printf 'working|all referenced tasks are provably working or gone:%s' "$seen" ;;
     paused)  printf 'paused|all referenced tasks are working or in a declared external pause:%s' "$seen" ;;
-    *)       printf 'actionable|%s' "$details" ;;
+    *)       if [ -n "$details" ]; then printf 'actionable|%s' "$details"
+             else printf 'seen|%s' "$covered"; fi ;;
   esac
 }
 

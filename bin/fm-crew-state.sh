@@ -21,8 +21,11 @@
 # stale-wake decisions. That mode probes the endpoint first, returns immediately
 # when it is gone or unrecorded, and appends `endpoint: alive` to the normal
 # bounded state read otherwise. Endpoint loss therefore cannot hide behind a
-# still-active run record. The default command and output remain unchanged for
-# normal operator reads.
+# still-active run record. Loss is only concluded after a bounded re-probe
+# (FM_CREW_STATE_ENDPOINT_RETRIES / FM_CREW_STATE_ENDPOINT_RETRY_DELAY), so a
+# transient backend round-trip failure does not recommend relaunching a live
+# crew. The default command and output remain unchanged for normal operator
+# reads.
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -166,9 +169,29 @@ pane_readable() {  # <target>
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
+# A single failed probe is NOT proof the endpoint is gone. pane_readable is a CLI
+# or socket round trip for every non-tmux backend (a herdr CLI timeout, a cmux
+# socket blip) and a momentarily unreachable tmux server fails every task at
+# once, so one miss would recommend relaunching crews that are alive and whose
+# pipeline is still running. Confirm with a bounded re-probe before concluding
+# loss; the retry count and delay are tunable so tests can drive both outcomes
+# without a wall-clock wait.
+ENDPOINT_RETRIES=${FM_CREW_STATE_ENDPOINT_RETRIES:-1}
+case "$ENDPOINT_RETRIES" in ''|*[!0-9]*) ENDPOINT_RETRIES=1 ;; esac
+ENDPOINT_RETRY_DELAY=${FM_CREW_STATE_ENDPOINT_RETRY_DELAY:-1}
+case "$ENDPOINT_RETRY_DELAY" in ''|*[!0-9]*) ENDPOINT_RETRY_DELAY=1 ;; esac
+endpoint_confirmed_readable() {  # <target>
+  local attempt=0
+  while :; do
+    if pane_readable "$1"; then return 0; fi
+    [ "$attempt" -lt "$ENDPOINT_RETRIES" ] || return 1
+    attempt=$((attempt + 1))
+    if [ "$ENDPOINT_RETRY_DELAY" -gt 0 ]; then sleep "$ENDPOINT_RETRY_DELAY"; fi
+  done
+}
 ENDPOINT_READABLE=unknown
 if [ "$RECONCILE_ENDPOINT" = 1 ] && [ -n "$BACKEND_TARGET" ]; then
-  if pane_readable "$BACKEND_TARGET"; then
+  if endpoint_confirmed_readable "$BACKEND_TARGET"; then
     ENDPOINT_READABLE=alive
     ENDPOINT_DETAIL='endpoint: alive'
   else

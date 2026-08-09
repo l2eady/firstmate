@@ -74,6 +74,10 @@ if [ "${1:-}" = "list-windows" ]; then
   exit 0
 fi
 if [ "${1:-}" = "capture-pane" ]; then
+  # FM_FAKE_TMUX_CAPTURE_FAIL models an UNREADABLE endpoint (a dead pane, a
+  # killed session, an unreachable server) as distinct from a readable pane whose
+  # content happens to be empty. Only a non-zero capture exit is endpoint loss.
+  [ -n "${FM_FAKE_TMUX_CAPTURE_FAIL:-}" ] && exit 1
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
   fi
@@ -135,6 +139,10 @@ case "${1:-}" in
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
   capture-pane)
+    # FM_FAKE_TMUX_CAPTURE_FAIL models an UNREADABLE endpoint (a dead pane, a
+    # killed session, an unreachable server) as distinct from a readable pane
+    # whose content happens to be empty. Only a non-zero exit is endpoint loss.
+    [ -n "${FM_FAKE_TMUX_CAPTURE_FAIL:-}" ] && exit 1
     # Honor a single-line band capture (-S N -E M, both non-negative) the way the
     # composer reader now bounds its capture to the cursor row; otherwise (e.g.
     # fm_pane_is_busy's "-S -40" tail) return the whole capture. -e is accepted and
