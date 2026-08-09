@@ -77,6 +77,17 @@ if [ "${1:-}" = "capture-pane" ]; then
   # FM_FAKE_TMUX_CAPTURE_FAIL models an UNREADABLE endpoint (a dead pane, a
   # killed session, an unreachable server) as distinct from a readable pane whose
   # content happens to be empty. Only a non-zero capture exit is endpoint loss.
+  # FM_FAKE_TMUX_CAPTURE_FAIL_TARGETS is the per-target form (space-separated
+  # targets), so a test can lose ONE endpoint while the rest of the fleet stays
+  # readable - the case that distinguishes a dead pane from a backend outage.
+  if [ -n "${FM_FAKE_TMUX_CAPTURE_FAIL_TARGETS:-}" ]; then
+    _t=""; _prev=""
+    for _a in "$@"; do
+      [ "$_prev" = "-t" ] && _t="$_a"
+      _prev="$_a"
+    done
+    case " $FM_FAKE_TMUX_CAPTURE_FAIL_TARGETS " in *" $_t "*) exit 1 ;; esac
+  fi
   [ -n "${FM_FAKE_TMUX_CAPTURE_FAIL:-}" ] && exit 1
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"

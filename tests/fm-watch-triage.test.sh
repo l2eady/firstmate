@@ -669,6 +669,86 @@ test_transient_capture_failure_absorbed() {
   pass "capture failures below the miss threshold are absorbed and only counted"
 }
 
+test_backend_wide_outage_reported_once_not_per_crew() {
+  # One dead endpoint and an unreachable BACKEND look identical per task. A cmux
+  # socket drop or a herdr daemon restart fails every probe at once while the
+  # crews keep running, so emitting the per-task "relaunch" wording once per
+  # in-flight crew would respawn live work. It must surface once, as itself.
+  local dir state fakebin out drain_out pid i win
+  dir=$(make_case endpoint-backend-outage); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  for i in 1 2 3; do
+    win="test:fm-fleet-b$i"
+    printf 'window=%s\nkind=ship\n' "$win" > "$state/fleet-b$i.meta"
+    printf 'working: implementing\n' > "$state/fleet-b$i.status"
+    printf '%s' "$(seen_sig "$state/fleet-b$i.status")" > "$state/.seen-fleet-b${i}_status"
+  done
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "a fleet-wide endpoint outage was never surfaced"
+  grep -F "check: endpoint backend:" "$out" >/dev/null \
+    || fail "a fleet-wide outage was not reported as a backend condition: $(cat "$out")"
+  grep -F "do NOT relaunch individual tasks" "$out" >/dev/null \
+    || fail "the backend-outage wake did not warn against relaunching live crews"
+  for i in 1 2 3; do
+    win=$(printf '%s' "test:fm-fleet-b$i" | tr ':/.' '___')
+    [ ! -e "$state/.endpoint-surfaced-$win" ] \
+      || fail "a fleet-wide outage marked task $i's endpoint episode surfaced"
+  done
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the backend wake failed"
+  [ "$(grep -c "$(printf '\tcheck\t')" "$drain_out")" -eq 1 ] \
+    || fail "a fleet-wide outage queued more than one recovery recommendation: $(cat "$drain_out")"
+  [ -e "$state/.endpoint-backend-outage" ] || fail "the backend-outage episode was not recorded"
+
+  # Still out on the next run: already surfaced, so no second wake.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch2.out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an already-surfaced backend outage woke firstmate again: $(cat "$dir/watch2.out")"
+  fi
+  reap "$pid"
+  pass "a fleet-wide capture outage surfaces once as a backend condition, never as a relaunch per crew"
+}
+
+test_single_lost_endpoint_amid_a_live_fleet_stays_per_task() {
+  # The complement: when only ONE recorded endpoint is unreadable the backend is
+  # demonstrably fine, so the per-task recovery recommendation is correct and the
+  # backend-outage record must not be set.
+  local dir state fakebin out pane pid i win dead
+  dir=$(make_case endpoint-one-of-many); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; pane="$dir/pane.txt"
+  # A busy signature keeps the live panes out of the stale layer, so this test
+  # exercises only the endpoint decision.
+  printf 'building\nesc to interrupt\n' > "$pane"
+  dead="test:fm-fleet-c2"
+  for i in 1 2 3; do
+    win="test:fm-fleet-c$i"
+    printf 'window=%s\nkind=ship\n' "$win" > "$state/fleet-c$i.meta"
+    printf 'working: implementing\n' > "$state/fleet-c$i.status"
+    printf '%s' "$(seen_sig "$state/fleet-c$i.status")" > "$state/.seen-fleet-c${i}_status"
+  done
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_CAPTURE_FAIL_TARGETS="$dead" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "a single lost endpoint among live ones was never surfaced"
+  grep -F "check: endpoint $dead" "$out" >/dev/null \
+    || fail "the lost endpoint was not reported per task: $(cat "$out")"
+  grep -F "task fleet-c2" "$out" >/dev/null || fail "the per-task wake lost its task id"
+  [ ! -e "$state/.endpoint-backend-outage" ] \
+    || fail "one lost endpoint among readable ones was misread as a backend outage"
+  pass "a single lost endpoint amid a readable fleet keeps its per-task recovery recommendation"
+}
+
 test_endpoint_wake_not_suppressed_when_the_queue_append_fails() {
   # The once-per-episode marker must never outlive a failed durable enqueue. A
   # dead endpoint never produces the successful capture that would clear the
@@ -1363,6 +1443,8 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_unreadable_endpoint_surfaces_once_per_episode
 test_transient_capture_failure_absorbed
+test_backend_wide_outage_reported_once_not_per_crew
+test_single_lost_endpoint_amid_a_live_fleet_stays_per_task
 test_endpoint_wake_not_suppressed_when_the_queue_append_fails
 test_secondmate_unreadable_endpoint_surfaces
 test_secondmate_idle_pane_still_absorbed

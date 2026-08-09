@@ -1253,6 +1253,40 @@ test_reconciliation_endpoint_loss_shares_the_episode_record() {
   pass "no-verb reconciliation participates in the shared endpoint-loss episode record"
 }
 
+test_housekeeping_defers_during_a_backend_outage() {
+  # While the backend is unreachable for the whole fleet, a failed probe says
+  # nothing about THIS crew. The stale recheck must keep its marker and wait
+  # rather than recommend relaunching a crew that is probably still running.
+  local dir state fakebin key wkey
+  dir=$(make_supercase stale-endpoint-backend-outage)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/live-w14.meta" "window=sess:fm-live-w14" "kind=ship"
+  printf 'working: building\n' > "$state/live-w14.status"
+  key=$(printf '%s' "live-w14" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-live-w14" | tr ':/.' '___')
+  : > "$state/.endpoint-backend-outage"
+
+  # Two ticks that would otherwise confirm a per-task loss at this threshold.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 housekeeping "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a backend outage produced a per-task relaunch recommendation: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "the recheck dropped its marker during a backend outage"
+  [ ! -e "$state/.endpoint-surfaced-$wkey" ] \
+    || fail "a backend outage marked this crew's endpoint episode surfaced"
+
+  # Backend back, endpoint still unreadable: now it is genuinely this crew.
+  rm -f "$state/.endpoint-backend-outage"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 housekeeping "$state"
+  grep -F 'task live-w14 endpoint unreadable' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the recheck stayed silent after the backend recovered: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  pass "the stale recheck withholds its per-task verdict while the backend itself is unreachable"
+}
+
 test_housekeeping_defers_to_the_watcher_endpoint_wake() {
   # The watcher's own endpoint-liveness poll already wakes firstmate with a
   # richer message. One lost endpoint must not put two lines in the same digest.
@@ -2093,6 +2127,7 @@ test_housekeeping_recovered_endpoint_resets_miss_count
 test_housekeeping_miss_count_requires_consecutive_rechecks
 test_housekeeping_declared_pause_resets_miss_count
 test_reconciliation_endpoint_loss_shares_the_episode_record
+test_housekeeping_defers_during_a_backend_outage
 test_housekeeping_defers_to_the_watcher_endpoint_wake
 test_classify_stale_dedup_against_signal
 test_pane_input_pending_bordered_idle_not_pending

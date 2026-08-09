@@ -209,7 +209,9 @@ crew_is_paused() {  # <id>
 # provably working nor deliberately paused. The caller already performed one
 # bounded current-state read, so this is a pure formatting decision over that
 # evidence. It deliberately carries the task id and distinguishes a lost
-# endpoint from a live idle endpoint.
+# endpoint from a live idle endpoint, recognising endpoint loss through the same
+# crew_state_endpoint_lost predicate that picks the endpoint-lost class, so the
+# prose and the class can never disagree about what this line reports.
 signal_reconciliation_detail() {  # <id> <state-line> <turn-end|status-signal>
   local task=$1 line=$2 context=$3 state phrase
   if [ "$context" = turn-end ]; then
@@ -220,12 +222,12 @@ signal_reconciliation_detail() {  # <id> <state-line> <turn-end|status-signal>
   state=${line#state: }; state=${state%% *}
   # Endpoint loss outranks everything: it is the one fact that makes the rest of
   # the read unreliable, whatever state it reports.
+  if crew_state_endpoint_lost "$line"; then
+    printf 'task %s endpoint gone %s (%s); recommended recovery: resume or relaunch from recorded metadata and worktree, then continue supervision' \
+      "$task" "$phrase" "${line:-state unreadable}"
+    return
+  fi
   case "$line" in
-    *'endpoint: gone'*|*'backend target gone:'*)
-      printf 'task %s endpoint gone %s (%s); recommended recovery: resume or relaunch from recorded metadata and worktree, then continue supervision' \
-        "$task" "$phrase" "${line:-state unreadable}"
-      return
-      ;;
     *'no backend target recorded'*|*'no metadata for '*|*'worktree gone'*)
       printf 'task %s has incomplete recorded state %s (%s); recommended recovery: reconcile its metadata and worktree before resume or safe teardown' \
         "$task" "$phrase" "${line:-state unreadable}"
