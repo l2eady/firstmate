@@ -917,6 +917,84 @@ test_classify_signal_dedup_against_scan() {
   pass "classify_signal dedupes against the catch-all scan seen marker"
 }
 
+test_classify_signal_mixed_wake_reconciles_the_other_task() {
+  # The watcher coalesces every signal inside its grace window, so one wake mixes
+  # a crew that reported a captain-relevant verb with another crew's bare
+  # turn-end. Regression: the second crew's lost endpoint must not ride along
+  # silently on the first crew's verb.
+  local dir state fakebin crew_state out
+  dir=$(make_supercase signal-mixed-wake)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  printf 'done: PR https://x/y/pull/11\n' > "$state/mixed-verb-m1.status"
+  : > "$state/mixed-orphan-m2.turn-ended"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE_mixed_orphan_m2='state: unknown · source: none · backend target gone: sess:fm-mixed-orphan-m2 · endpoint: gone' \
+    classify_signal "$state/mixed-verb-m1.status $state/mixed-orphan-m2.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "mixed wake did not escalate: $out" ;; esac
+  assert_contains "$out" "mixed-verb-m1.status: done: PR https://x/y/pull/11" \
+    "mixed wake dropped the captain-relevant status"
+  assert_contains "$out" "task mixed-orphan-m2 endpoint gone" \
+    "mixed wake absorbed the coalesced orphan turn-end"
+  assert_contains "$out" "recommended recovery:" "mixed wake carried no recovery guidance"
+
+  # A crew whose own status carried the verb is owned by the status path, so its
+  # coalesced turn-end must not be reconciled into a second entry.
+  : > "$state/mixed-verb-m1.turn-ended"
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · fake default' \
+    classify_signal "$state/mixed-verb-m1.status $state/mixed-verb-m1.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "terminal status wake did not escalate: $out" ;; esac
+  assert_not_contains "$out" "task mixed-verb-m1" \
+    "a task handled by the status path was reconciled into a duplicate entry"
+  pass "classify_signal reconciles coalesced tasks the status path does not own"
+}
+
+test_classify_signal_reconciliation_dedup() {
+  # The reconciliation escalation path has no status line for the status seen
+  # marker to record, so it keeps its own. Regression: an unchanged verdict must
+  # not re-inject the same digest on every later turn-end wake.
+  local dir state fakebin crew_state out key
+  dir=$(make_supercase signal-reconcile-dedup)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  : > "$state/recon-dup-r7.turn-ended"
+  key=$(printf '%s' "recon-dup-r7" | tr ':/.' '___')
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · outcome: checks-passed' \
+    classify_signal "$state/recon-dup-r7.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "first reconciliation did not escalate: $out" ;; esac
+  assert_contains "$out" "task recon-dup-r7 reports done" "first reconciliation lost the task detail"
+  [ -e "$state/.subsuper-seen-reconcile-$key" ] || fail "first reconciliation recorded no dedupe marker"
+
+  # Same unchanged verdict on the next turn-end: self-handle, no second digest.
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · outcome: checks-passed' \
+    classify_signal "$state/recon-dup-r7.turn-ended" "$state")
+  case "$out" in self\|*) ;; *) fail "unchanged reconciliation re-escalated: $out" ;; esac
+
+  # A changed verdict is a new fact and must surface again.
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-recon-dup-r7 · endpoint: gone' \
+    classify_signal "$state/recon-dup-r7.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "a changed reconciliation verdict was suppressed: $out" ;; esac
+
+  # Recovering to provably-working clears the marker, so a later recurrence of
+  # the earlier verdict is never swallowed.
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating' \
+    classify_signal "$state/recon-dup-r7.turn-ended" "$state")
+  case "$out" in self\|*) ;; *) fail "recovered crew did not self-handle: $out" ;; esac
+  [ ! -e "$state/.subsuper-seen-reconcile-$key" ] || fail "recovery did not clear the reconciliation dedupe marker"
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-recon-dup-r7 · endpoint: gone' \
+    classify_signal "$state/recon-dup-r7.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "a recurrence after recovery was swallowed: $out" ;; esac
+  pass "classify_signal deduplicates unchanged reconciliation verdicts without swallowing recurrences"
+}
+
 test_classify_stale_dedup_against_signal() {
   # If the signal path already escalated a status (seen marker matches),
   # classify_stale must self-handle to avoid a duplicate in the digest.
@@ -1726,6 +1804,8 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
+test_classify_signal_mixed_wake_reconciles_the_other_task
+test_classify_signal_reconciliation_dedup
 test_classify_stale_dedup_against_signal
 test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending

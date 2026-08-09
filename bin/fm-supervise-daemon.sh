@@ -362,11 +362,18 @@ discover_supervisor_backend() {
   return 1
 }
 
-# --- classification helpers (PURE: no side effects, testable) ---------------
+# --- classification helpers (testable; state dir is the only side effect) ----
 # last_status_line, status_is_captain_relevant, window_to_task, and
 # scan_captain_relevant_statuses come from bin/fm-classify-lib.sh (sourced above),
 # the single classifier shared with bin/fm-watch.sh. The decision-string wrappers
 # and dedup state below layer the daemon's escalation-digest concerns on top.
+#
+# NOT pure: classify_signal performs ONE bounded live-state read per referenced
+# task (fm-crew-state.sh, which may make a bounded no-mistakes call and probe the
+# backend endpoint) for the tasks that carry no captain-relevant verb in this
+# wake, and records the reconciliation dedupe markers for the ones it escalates.
+# classify_stale, classify_check, classify_heartbeat, and classify_unknown remain
+# pure reads. Keep classify_signal off any hot path.
 #
 # Decision protocol: every classifier prints exactly one line on stdout of the
 # form "<action>|<distilled>" where action is "self" or "escalate". The distilled
@@ -376,8 +383,9 @@ discover_supervisor_backend() {
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
   local reconciliation reconcile_class reconcile_detail
-  local -a signal_files
+  local -a signal_files rel_tasks unhandled
   read -r -a signal_files <<<"$reason"
+  rel_tasks=()
   for f in "${signal_files[@]}"; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
@@ -390,25 +398,52 @@ classify_signal() {  # <reason-after-colon> <state>
     # single source of truth shared between the per-wake signal path and the
     # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
     task=$(basename "$f"); task="${task%.status}"
+    rel_tasks+=("$task")
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
   done
   # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
-  if [ -z "$rel" ]; then
+  # Partition by TASK, not by wake. The watcher coalesces every signal that lands
+  # inside its grace window, so one wake routinely mixes a crew that reported a
+  # captain-relevant verb with another crew's bare turn-end. A task whose status
+  # carries a verb in this wake is owned by the deduplicated status path above;
+  # every other referenced task still needs live-state reconciliation, or a
+  # stopped or endpoint-gone crew rides along silently on someone else's verb
+  # (its .seen-* signature already advanced, a gone endpoint produces no stale
+  # wake, and the catch-all scan only looks at captain-relevant statuses).
+  unhandled=()
+  for f in "${signal_files[@]}"; do
+    task=$(signal_file_task "$f")
+    [ -n "$task" ] || continue
+    case " ${rel_tasks[*]-} " in *" $task "*) continue ;; esac
+    unhandled+=("$f")
+  done
+  if [ "${#unhandled[@]}" -gt 0 ]; then
     # A no-verb signal is routine only with positive live-state evidence. This
     # is the same bounded reconciliation the always-on watcher uses, extended
     # with paused and recovery detail so away mode cannot silently absorb a
     # stopped turn or lost endpoint.
-    reconciliation=$(signal_crew_reconciliation "${signal_files[@]}")
-    reconcile_class=${reconciliation%%|*}
-    reconcile_detail=${reconciliation#*|}
+    reconciliation=$(signal_reconciliation_decision "$state" "${unhandled[@]}")
+  elif [ -n "$rel" ]; then
+    reconciliation='none|every referenced task is handled by the status path'
+  else
+    reconciliation='actionable|signal did not resolve a task; recommended action: inspect the queued wake and reconcile its task metadata'
+  fi
+  reconcile_class=${reconciliation%%|*}
+  reconcile_detail=${reconciliation#*|}
+  if [ -z "$rel" ]; then
     case "$reconcile_class" in
       working)    printf 'self|routine signal: %s (%s)' "$distilled" "$reconcile_detail" ;;
       paused)     printf 'self|declared external pause: %s' "$reconcile_detail" ;;
+      seen)       printf 'self|reconciliation already escalated: %s' "$reconcile_detail" ;;
       actionable) printf 'escalate|%s' "$reconcile_detail" ;;
       *)          printf 'escalate|uncertain no-verb signal reconciliation: %s' "$reconciliation" ;;
     esac
+  elif [ "$reconcile_class" = actionable ]; then
+    # A mixed wake: escalate the captain-relevant status AND the coalesced task
+    # that needs reconciliation, so neither is lost to the other's classification.
+    printf 'escalate|%s | %s' "$distilled" "$reconcile_detail"
   elif [ "$all_seen" = "1" ]; then
     # Every relevant status was already escalated by the catch-all scan;
     # self-handle to avoid a duplicate entry in the digest.
@@ -470,6 +505,12 @@ classify_unknown() {  # <reason>
 # Buffer:   state/.subsuper-escalations    one distilled line per escalation.
 # Seen:     state/.subsuper-seen-status-<task>  last status line the scan
 #           escalated, so the catch-all does not re-fire the same terminal.
+# Seen:     state/.subsuper-seen-reconcile-<task>  last reconciliation detail the
+#           signal path escalated, so an unchanged verdict (a crew that stays
+#           done, an endpoint that stays gone) does not re-inject on every later
+#           turn-end wake. Mirrors the status marker; cleared as soon as the task
+#           reconciles as working or paused again, or a new captain-relevant
+#           status is escalated for it, so a recurrence is never swallowed.
 
 _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
@@ -566,6 +607,75 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
 mark_status_seen() {  # <state> <task> <last-line>
   local state=$1 task=$2 line=$3
   printf '%s' "$line" > "$state/.subsuper-seen-status-$(_stale_key "$task")"
+  # A fresh captain-relevant status supersedes whatever reconciliation last
+  # escalated for this task, so the reconciliation dedupe must not suppress the
+  # next divergence.
+  reconcile_seen_clear "$state" "$task"
+}
+
+# --- no-verb signal reconciliation dedupe -----------------------------------
+# The reconciliation escalation path is outside the status seen-marker (a bare
+# turn-end carries no status line for mark_escalated_seen to record), so it keeps
+# its own per-task marker. Without it, an unchanged verdict re-injects the same
+# digest on every later turn-end wake - the injection loop away-mode batching
+# must not have.
+_reconcile_seen_file() {  # <state> <task>
+  printf '%s/.subsuper-seen-reconcile-%s' "$1" "$(_stale_key "$2")"
+}
+
+reconcile_seen_matches() {  # <state> <task> <detail>
+  [ "$(cat "$(_reconcile_seen_file "$1" "$2")" 2>/dev/null || true)" = "$3" ]
+}
+
+mark_reconcile_seen() {  # <state> <task> <detail>
+  printf '%s' "$3" > "$(_reconcile_seen_file "$1" "$2")"
+}
+
+reconcile_seen_clear() {  # <state> <task>
+  rm -f "$(_reconcile_seen_file "$1" "$2")"
+}
+
+# Reconcile the tasks a wake references that the status path does not already
+# own, applying the per-task dedupe above. Classification itself stays in
+# bin/fm-classify-lib.sh (crew_signal_reconciliation); this only layers the
+# daemon's digest-dedupe concern on top. Prints "<class>|<detail>":
+#   working|...    every task has positive active-work evidence
+#   paused|...     absorbable, at least one declared external pause
+#   seen|...       actionable, but every detail was already escalated
+#   actionable|... at least one NEW actionable task, with recovery guidance
+signal_reconciliation_decision() {  # <state> <file> ...
+  local state=$1; shift
+  local task context rec class detail resolved="" fresh="" repeat="" overall=working
+  while IFS="$(printf '\t')" read -r task context; do
+    [ -n "$task" ] || continue
+    resolved=1
+    rec=$(crew_signal_reconciliation "$task" "$context")
+    class=${rec%%|*}; detail=${rec#*|}
+    case "$class" in
+      working)
+        reconcile_seen_clear "$state" "$task" ;;
+      paused)
+        reconcile_seen_clear "$state" "$task"
+        [ "$overall" = actionable ] || overall=paused ;;
+      *)
+        overall=actionable
+        if reconcile_seen_matches "$state" "$task" "$detail"; then
+          repeat="${repeat}${repeat:+ | }${detail}"
+        else
+          mark_reconcile_seen "$state" "$task" "$detail"
+          fresh="${fresh}${fresh:+ | }${detail}"
+        fi ;;
+    esac
+  done <<<"$(signal_wake_tasks "$@")"
+  if [ -z "$resolved" ]; then
+    printf 'actionable|signal did not resolve a task; recommended action: inspect the queued wake and reconcile its task metadata'
+    return
+  fi
+  case "$overall" in
+    working) printf 'working|all referenced tasks are provably working' ;;
+    paused)  printf 'paused|all referenced tasks are working or in a declared external pause' ;;
+    *)       if [ -n "$fresh" ]; then printf 'actionable|%s' "$fresh"; else printf 'seen|%s' "$repeat"; fi ;;
+  esac
 }
 
 # Mark every captain-relevant status line a per-wake classification escalated as

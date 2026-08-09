@@ -124,13 +124,15 @@ While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to
 
 Classify each wake this way:
 
-- `signal` with a captain-relevant status verb
+- Classify a `signal` per TASK, not per wake, because the watcher coalesces every signal that lands inside its grace window into one wake.
+- A task whose status carries a captain-relevant verb
   (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
   -> escalate on the existing deduplicated status path.
-- `signal` with no captain-relevant verb, including a bare turn-end -> run one bounded `fm-crew-state.sh` reconciliation per referenced task through the shared classifier.
+- Every other task the same wake references, including a bare turn-end coalesced alongside someone else's verb -> run one bounded `fm-crew-state.sh` reconciliation per task through the shared classifier.
   Positive run-step or busy-pane evidence -> self-handle.
   A declared external pause -> self-handle and retain its bounded pause recheck.
   A stopped, idle, uncertain, or endpoint-gone task -> escalate immediately with its task id, current-state evidence, and recommended continuation or recovery action.
+  That reconciliation escalation carries its own per-task dedupe, so an unchanged verdict does not re-inject on every later turn-end; the marker clears as soon as the task reconciles as working or paused again, or a new captain-relevant status is escalated for it.
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.

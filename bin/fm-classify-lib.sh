@@ -247,6 +247,76 @@ signal_reconciliation_detail() {  # <id> <state-line> <turn-end|status-signal>
   esac
 }
 
+# Map one wake file onto the task it belongs to. Prints nothing for a path that
+# is not a per-task signal file.
+signal_file_task() {  # <file>
+  local base=${1##*/}
+  case "$base" in
+    *.status)     printf '%s' "${base%.status}" ;;
+    *.turn-ended) printf '%s' "${base%.turn-ended}" ;;
+  esac
+}
+
+# The home that owns a task's signal file in this wake: the directory of the
+# first per-task signal file naming it, falling back to the ambient state dir for
+# a bare filename. A wake reason can carry an absolute path from another
+# firstmate home, so liveness has to be judged against the home that actually
+# owns the task rather than whichever state dir this process happens to hold.
+signal_task_state_dir() {  # <task> <file> ...
+  local task=$1 f
+  shift
+  for f in "$@"; do
+    [ "$(signal_file_task "$f")" = "$task" ] || continue
+    case "$f" in */*) printf '%s' "${f%/*}"; return ;; esac
+    break
+  done
+  printf '%s' "${STATE:-${FM_STATE_OVERRIDE:-}}"
+}
+
+# Reduce a wake's file list to one "<task><TAB><turn-end|status-signal>" record
+# per unique task, in first-seen order. A task whose turn-end marker is part of
+# the same wake reports turn-end context, because that is the shape the incident
+# is described from. This is the shared fan-in for every per-task reconciliation
+# consumer below, so the wake-to-task mapping has exactly one definition.
+signal_wake_tasks() {  # <file> ...
+  local f task seen="" turn_ended=""
+  for f in "$@"; do
+    task=$(signal_file_task "$f")
+    [ -n "$task" ] || continue
+    case "${f##*/}" in
+      *.turn-ended) case " $turn_ended " in *" $task "*) ;; *) turn_ended="$turn_ended $task" ;; esac ;;
+    esac
+    case " $seen " in *" $task "*) continue ;; esac
+    seen="$seen $task"
+  done
+  for task in $seen; do
+    case " $turn_ended " in
+      *" $task "*) printf '%s\t%s\n' "$task" turn-end ;;
+      *)           printf '%s\t%s\n' "$task" status-signal ;;
+    esac
+  done
+}
+
+# Reconcile ONE task with exactly one bounded fm-crew-state.sh read and print
+# "<working|paused|actionable>|<detail>". This is the single per-task decision
+# every reconciliation consumer shares: the aggregate below, and the away-mode
+# daemon, which needs per-task granularity to apply its escalation dedupe
+# without a second live-state read.
+crew_signal_reconciliation() {  # <task> [turn-end|status-signal]
+  local task=$1 context=${2:-status-signal} line class
+  if [ -z "$task" ]; then
+    printf 'actionable|signal did not resolve a task; recommended action: inspect the queued wake and reconcile its task metadata'
+    return
+  fi
+  line=$(crew_state_line "$task")
+  class=$(crew_absorb_class_from_line "$line")
+  case "$class" in
+    working) printf 'working|task %s is provably working (%s)' "$task" "${line:-state unreadable}" ;;
+    paused)  printf 'paused|task %s is in a declared external pause (%s)' "$task" "${line:-state unreadable}" ;;
+    *)       printf 'actionable|%s' "$(signal_reconciliation_detail "$task" "$line" "$context")" ;;
+  esac
+}
+
 # Reconcile every unique task referenced by a no-verb signal using exactly one
 # fm-crew-state.sh read per task. Prints one decision record:
 #   working|...    every task has positive active-work evidence, or is gone;
@@ -254,53 +324,27 @@ signal_reconciliation_detail() {  # <id> <state-line> <turn-end|status-signal>
 #   actionable|... at least one task stopped, lost its endpoint, or is uncertain.
 # The actionable detail includes each affected task id and the recommended next
 # step so away-mode batching can surface a useful recovery instruction without a
-# second live-state read. The always-on watcher consumes the same decision through
-# signal_crew_provably_working below, keeping one classification owner.
+# second live-state read.
 signal_crew_reconciliation() {  # <file> ...
-  local f base task seen="" turn_ended="" orphans="" dir line class overall=working
-  local details="" item context
-  local -a tasks
-  for f in "$@"; do
-    base=${f##*/}
-    case "$base" in
-      *.status)     task=${base%.status} ;;
-      *.turn-ended) task=${base%.turn-ended}
-                    case " $turn_ended " in *" $task "*) ;; *) turn_ended="$turn_ended $task" ;; esac ;;
-      *)            continue ;;
-    esac
+  local task context rec class detail seen="" details="" overall=working
+  while IFS="$(printf '\t')" read -r task context; do
     [ -n "$task" ] || continue
-    case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
-    # Resolve the state dir from the signal file itself, so an absolute path in a
-    # wake reason is classified against the home that actually owns it. A task
-    # with no meta there is gone, so it is absorbed without a live-state read.
-    dir=${f%/*}
-    if task_is_orphan "$dir" "$task"; then orphans="$orphans $task"; fi
-  done
+    # A gone task is absorbed before any live-state read: there is nothing to
+    # reconcile and nobody to wake for.
+    if task_is_orphan "$(signal_task_state_dir "$task" "$@")" "$task"; then continue; fi
+    rec=$(crew_signal_reconciliation "$task" "$context")
+    class=${rec%%|*}; detail=${rec#*|}
+    case "$class" in
+      working) ;;
+      paused)  [ "$overall" = actionable ] || overall=paused ;;
+      *)       overall=actionable; details="${details}${details:+ | }${detail}" ;;
+    esac
+  done <<<"$(signal_wake_tasks "$@")"
   if [ -z "$seen" ]; then
     printf 'actionable|signal did not resolve a task; recommended action: inspect the queued wake and reconcile its task metadata'
     return
   fi
-  read -r -a tasks <<<"$seen"
-  for task in "${tasks[@]}"; do
-    # A gone task has nothing to reconcile and nobody to wake for.
-    case " $orphans " in *" $task "*) continue ;; esac
-    line=$(crew_state_line "$task")
-    class=$(crew_absorb_class_from_line "$line")
-    case "$class" in
-      working) ;;
-      paused)
-        [ "$overall" = actionable ] || overall=paused
-        ;;
-      *)
-        overall=actionable
-        context=status-signal
-        case " $turn_ended " in *" $task "*) context=turn-end ;; esac
-        item=$(signal_reconciliation_detail "$task" "$line" "$context")
-        details="${details}${details:+ | }${item}"
-        ;;
-    esac
-  done
   case "$overall" in
     working) printf 'working|all referenced tasks are provably working or gone:%s' "$seen" ;;
     paused)  printf 'paused|all referenced tasks are working or in a declared external pause:%s' "$seen" ;;
@@ -311,13 +355,22 @@ signal_crew_reconciliation() {  # <file> ...
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is
 # provably working or gone; 1 (actionable/surface) if any is paused, stopped,
 # uncertain, or cannot be resolved. A normal-mode declared pause intentionally
-# surfaces its initial signal; away mode consumes the richer paused decision above
-# and tracks the bounded pause recheck.
+# surfaces its initial signal; away mode consumes the richer per-task decisions
+# above and tracks the bounded pause recheck.
+# The always-on watcher only needs the boolean, so this stops at the first task
+# that is not absorbable rather than paying a bounded live-state read for every
+# remaining task in the wake.
 signal_crew_provably_working() {  # <file> ...
-  case "$(signal_crew_reconciliation "$@")" in
-    working\|*) return 0 ;;
-  esac
-  return 1
+  local task context resolved=""
+  while IFS="$(printf '\t')" read -r task context; do
+    [ -n "$task" ] || continue
+    resolved=1
+    case "$(crew_absorb_class "$task" "$(signal_task_state_dir "$task" "$@")")" in
+      working|orphan) ;;
+      *) return 1 ;;
+    esac
+  done <<<"$(signal_wake_tasks "$@")"
+  [ -n "$resolved" ]
 }
 
 # 0 (terminal/actionable) if a stale window's last status line is
