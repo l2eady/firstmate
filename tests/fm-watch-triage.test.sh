@@ -273,6 +273,43 @@ test_signal_crew_provably_working_classifier() {
   pass "signal_crew_provably_working: benign only when every referenced crew is provably working or gone"
 }
 
+# signal_reconciliation_detail turns one current-state line into the recovery
+# guidance away mode acts on directly, so the guidance must never contradict the
+# state it quotes. Precedence: a lost or unrecorded endpoint first (it makes the
+# rest of the read unreliable), then the reported state, then the source.
+test_signal_reconciliation_detail_precedence() {
+  local out
+
+  # A checks-green crew monitoring its PR reports done FROM the status log. That
+  # is a completion to record, not an unfinished task to continue.
+  out=$(signal_reconciliation_detail pr-wait-p1 \
+    'state: done · source: status-log · PR ready · run still monitoring PR' turn-end)
+  case "$out" in
+    *'reports done'*) ;;
+    *) fail "a done crew reading from the status log was not described as done: $out" ;;
+  esac
+  case "$out" in
+    *'continue the unfinished task'*) fail "done guidance contradicted the state it quotes: $out" ;;
+  esac
+
+  # A genuinely idle crew with no run to consult still gets continue-the-task guidance.
+  out=$(signal_reconciliation_detail idle-p2 \
+    'state: unknown · source: status-log · working: implementing' turn-end)
+  case "$out" in
+    *'endpoint alive but idle'*) ;;
+    *) fail "an idle non-done crew lost its inspect-and-continue guidance: $out" ;;
+  esac
+
+  # Endpoint loss outranks a done state: the read itself is unreliable.
+  out=$(signal_reconciliation_detail gone-p3 \
+    'state: done · source: run-step · outcome: checks-passed · endpoint: gone' turn-end)
+  case "$out" in
+    *'endpoint gone'*) ;;
+    *) fail "endpoint loss was shadowed by the reported state: $out" ;;
+  esac
+  pass "signal_reconciliation_detail ranks endpoint loss over state, and state over source"
+}
+
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
 
 test_provably_working_signal_absorbed() {
@@ -630,6 +667,50 @@ test_transient_capture_failure_absorbed() {
   [ ! -e "$state/.endpoint-surfaced-$key" ] || fail "a sub-threshold capture failure marked the episode surfaced"
   reap "$pid"
   pass "capture failures below the miss threshold are absorbed and only counted"
+}
+
+test_endpoint_wake_not_suppressed_when_the_queue_append_fails() {
+  # The once-per-episode marker must never outlive a failed durable enqueue. A
+  # dead endpoint never produces the successful capture that would clear the
+  # marker, so suppressing on an unqueued wake would silence the orphan forever -
+  # the exact failure this check exists to break.
+  local dir state fakebin out window key pid status
+  dir=$(make_case endpoint-append-fails); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-append-e3"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/append-e3.meta"
+  printf 'working: implementing\n' > "$state/append-e3.status"
+  printf '%s' "$(seen_sig "$state/append-e3.status")" > "$state/.seen-append-e3_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # Make the durable queue's sequence write fail: a directory cannot be written
+  # to as a file, so fm_wake_append returns non-zero exactly as a full or
+  # read-only state dir would.
+  mkdir -p "$state/.wake-queue.seq"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
+  pid=$!
+  wait_for_exit "$pid" 60; status=$?
+  [ "$status" -ne 124 ] || fail "the watcher never reached the failing durable enqueue"
+  [ "$status" -ne 0 ] || fail "the watcher reported success despite a failed durable enqueue"
+  [ ! -e "$state/.endpoint-surfaced-$key" ] \
+    || fail "the episode was marked surfaced even though its wake was never queued"
+
+  # Queue writable again: the same unreadable endpoint must still surface.
+  rmdir "$state/.wake-queue.seq"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch2.out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "the endpoint stayed silent after the queue recovered"
+  grep -F "check: endpoint $window" "$dir/watch2.out" >/dev/null \
+    || fail "the recovered run did not surface the endpoint wake: $(cat "$dir/watch2.out")"
+  grep "$(printf '\tcheck\t')" "$state/.wake-queue" | grep -F "endpoint $window" >/dev/null \
+    || fail "the recovered endpoint wake was not durably queued"
+  pass "a failed durable enqueue leaves the endpoint episode unsuppressed so it surfaces on recovery"
 }
 
 test_secondmate_unreadable_endpoint_surfaces() {
@@ -1268,6 +1349,7 @@ test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
+test_signal_reconciliation_detail_precedence
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
@@ -1281,6 +1363,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_unreadable_endpoint_surfaces_once_per_episode
 test_transient_capture_failure_absorbed
+test_endpoint_wake_not_suppressed_when_the_queue_append_fails
 test_secondmate_unreadable_endpoint_surfaces
 test_secondmate_idle_pane_still_absorbed
 test_nonterminal_stale_paused_absorbed_then_resurfaced

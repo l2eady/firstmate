@@ -680,10 +680,18 @@ endpoint_loss_confirmed() {  # <state> <window>
   [ "$n" -ge "${FM_ENDPOINT_MISS_POLLS:-$ENDPOINT_MISS_POLLS_DEFAULT}" ]
 }
 
-# 0 when the watcher's own endpoint-liveness poll already surfaced this episode
-# for this window, so one lost endpoint never puts two lines in the same digest.
-endpoint_already_surfaced_by_watcher() {  # <state> <window>
+# state/.endpoint-surfaced-<window> is the SHARED per-episode record for a lost
+# endpoint, written by whichever detector confirms the loss first and cleared by
+# the watcher's endpoint_miss_clear as soon as the endpoint reads again. Both
+# detectors run on the same cadence with the same threshold, so which one gets
+# there first is decided by tick phase; the guard only avoids a duplicate digest
+# line if it is symmetric, which means the daemon records the episode too.
+endpoint_already_surfaced() {  # <state> <window>
   [ -e "$1/.endpoint-surfaced-$(_stale_key "$2")" ]
+}
+
+endpoint_mark_surfaced() {  # <state> <window>
+  : > "$1/.endpoint-surfaced-$(_stale_key "$2")"
 }
 
 # 0 when the task's CURRENT last status line is captain-relevant and identical to
@@ -1204,11 +1212,12 @@ housekeeping() {  # <state>
          # silently. But stale_window_is_busy concludes that from ONE capture,
          # and one miss is not proof, so confirm it across consecutive rechecks
          # and keep the stale marker until then so the recheck repeats.
-         if endpoint_already_surfaced_by_watcher "$state" "$win"; then
+         if endpoint_already_surfaced "$state" "$win"; then
            endpoint_miss_reset "$state" "$win"
            rm -f "$marker"
          elif endpoint_loss_confirmed "$state" "$win"; then
            escalate_add "$state" "task $task endpoint unreadable after ${age}s idle ($win); last reported: ${last:-no status}; recommended recovery: resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision"
+           endpoint_mark_surfaced "$state" "$win"
            endpoint_miss_reset "$state" "$win"
            rm -f "$marker"
          fi ;;

@@ -217,6 +217,9 @@ signal_reconciliation_detail() {  # <id> <state-line> <turn-end|status-signal>
   else
     phrase='after a no-verb status wake without a terminal status'
   fi
+  state=${line#state: }; state=${state%% *}
+  # Endpoint loss outranks everything: it is the one fact that makes the rest of
+  # the read unreliable, whatever state it reports.
   case "$line" in
     *'endpoint: gone'*|*'backend target gone:'*)
       printf 'task %s endpoint gone %s (%s); recommended recovery: resume or relaunch from recorded metadata and worktree, then continue supervision' \
@@ -228,23 +231,25 @@ signal_reconciliation_detail() {  # <id> <state-line> <turn-end|status-signal>
         "$task" "$phrase" "${line:-state unreadable}"
       return
       ;;
+  esac
+  # The reported STATE outranks the source it came from. A checks-green crew
+  # monitoring its PR reports done from the status log, and describing that as an
+  # unfinished task to continue would contradict the very line it quotes - and
+  # away mode acts on this text, not on operator prose.
+  if [ "$state" = done ]; then
+    printf 'task %s reports done %s (%s); recommended action: record completion and continue the existing delivery or safe teardown path' \
+      "$task" "$phrase" "${line:-state unreadable}"
+    return
+  fi
+  case "$line" in
     *'source: status-log'*|*'no current-state source available'*)
       printf 'task %s endpoint alive but idle %s (%s); recommended action: inspect and continue the unfinished task' \
         "$task" "$phrase" "${line:-state unreadable}"
       return
       ;;
   esac
-  state=${line#state: }; state=${state%% *}
-  case "$state" in
-    done)
-      printf 'task %s reports done %s (%s); recommended action: record completion and continue the existing delivery or safe teardown path' \
-        "$task" "$phrase" "${line:-state unreadable}"
-      ;;
-    *)
-      printf 'task %s needs reconciliation %s (%s); recommended action: inspect live state and continue or recover the task' \
-        "$task" "$phrase" "${line:-state unreadable}"
-      ;;
-  esac
+  printf 'task %s needs reconciliation %s (%s); recommended action: inspect live state and continue or recover the task' \
+    "$task" "$phrase" "${line:-state unreadable}"
 }
 
 # Map one wake file onto the task it belongs to. Prints nothing for a path that

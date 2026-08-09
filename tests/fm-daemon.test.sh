@@ -1108,6 +1108,11 @@ test_housekeeping_unreadable_endpoint_escalates() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
   [ -s "$state/.subsuper-escalations" ] || fail "a confirmed unreadable endpoint was silently dropped by the stale recheck"
+  # The episode record is shared with the watcher's endpoint poll. Whichever
+  # detector confirms first must write it, or the other repeats the same
+  # recovery recommendation into the same digest.
+  [ -e "$state/.endpoint-surfaced-$(printf '%s' "sess:fm-orphan-w9" | tr ':/.' '___')" ] \
+    || fail "the daemon escalated an endpoint loss without recording the shared episode"
   grep -F 'task orphan-w9 endpoint unreadable' "$state/.subsuper-escalations" >/dev/null \
     || fail "the unreadable-endpoint escalation did not carry its task id"
   grep -F 'last reported: working: building' "$state/.subsuper-escalations" >/dev/null \

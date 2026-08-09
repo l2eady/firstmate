@@ -409,13 +409,17 @@ endpoint_miss_record() {  # <window> <task> [last-status-line]
   printf '%s' "$n" > "$STATE/.endpoint-miss-$key"
   [ "$n" -ge "$ENDPOINT_MISS_POLLS" ] || return 0
   [ -e "$STATE/.endpoint-surfaced-$key" ] && return 0
-  : > "$STATE/.endpoint-surfaced-$key"
   # Carry what the task last reported. A crew that already reported done and is
   # waiting on a merge has a legitimately closed endpoint, and away mode acts on
   # this digest line itself rather than on any operator prose, so a bare relaunch
   # instruction would be the wrong call for it.
   reason="check: endpoint $win: task ${task:-unknown} endpoint unreadable for $n consecutive polls; last reported: ${last:-no status}; recommended recovery: resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision"
+  # Enqueue BEFORE suppressing, the same ordering every other wake site here
+  # uses. A dead endpoint never produces the successful capture that would clear
+  # this marker, so writing it ahead of a failed append would suppress the
+  # orphan permanently - the exact silence this check exists to break.
   fm_wake_append check "endpoint-$key" "$reason" || exit 1
+  : > "$STATE/.endpoint-surfaced-$key"
   wake "$reason"
 }
 
