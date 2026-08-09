@@ -375,7 +375,10 @@ discover_supervisor_backend() {
 
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
-  for f in $reason; do
+  local reconciliation reconcile_class reconcile_detail
+  local -a signal_files
+  read -r -a signal_files <<<"$reason"
+  for f in "${signal_files[@]}"; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
@@ -393,7 +396,19 @@ classify_signal() {  # <reason-after-colon> <state>
   # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
   if [ -z "$rel" ]; then
-    printf 'self|routine signal: %s' "$distilled"
+    # A no-verb signal is routine only with positive live-state evidence. This
+    # is the same bounded reconciliation the always-on watcher uses, extended
+    # with paused and recovery detail so away mode cannot silently absorb a
+    # stopped turn or lost endpoint.
+    reconciliation=$(signal_crew_reconciliation "${signal_files[@]}")
+    reconcile_class=${reconciliation%%|*}
+    reconcile_detail=${reconciliation#*|}
+    case "$reconcile_class" in
+      working)    printf 'self|routine signal: %s (%s)' "$distilled" "$reconcile_detail" ;;
+      paused)     printf 'self|declared external pause: %s' "$reconcile_detail" ;;
+      actionable) printf 'escalate|%s' "$reconcile_detail" ;;
+      *)          printf 'escalate|uncertain no-verb signal reconciliation: %s' "$reconciliation" ;;
+    esac
   elif [ "$all_seen" = "1" ]; then
     # Every relevant status was already escalated by the catch-all scan;
     # self-handle to avoid a duplicate entry in the digest.

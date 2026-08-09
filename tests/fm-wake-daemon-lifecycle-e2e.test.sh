@@ -9,6 +9,8 @@
 #   buffered digest flushes to the supervisor pane as exactly ONE submission
 #   stale working-pane: transient (self + marker) -> persistent (escalates once,
 #     clears its marker) -> resumed/busy (clears without escalating)
+#   turn-ended reconciliation: endpoint gone, endpoint idle, terminal done, and
+#     a declared external pause
 #
 # This proves the operator-visible routing/queueing/dedupe behavior through real
 # fm-watch.sh runs plus the daemon's own functions. The captain-relevant
@@ -57,6 +59,9 @@ test_routine_then_terminal_after_restart() {
   out="$dir/watch.out"
   drain_out="$dir/drain.out"
   status_file="$state/task-w1.status"
+  FM_CREW_STATE_BIN=$(make_fake_crew_state "$fakebin")
+  export FM_CREW_STATE_BIN
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy · endpoint: alive'
 
   # A routine status fires a signal; the watcher queues it and exits.
   printf 'working: building\n' > "$status_file"
@@ -101,7 +106,112 @@ test_routine_then_terminal_after_restart() {
     || fail "escalate_flush failed for the buffered digest"
   [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "buffered digest was not submitted exactly once"
   [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after a successful flush"
+  unset FM_FAKE_CREW_STATE
   pass "lifecycle: routine self-handles, terminal survives a watcher restart, buffers once, no dup, injects once"
+}
+
+# The incident shape is a turn-end marker with no terminal status. Away mode must
+# reconcile the live task state before deciding the signal is routine. These four
+# cases use separate state roots and the real watcher -> durable queue -> daemon
+# routing path so no production task metadata, endpoint, or worktree is touched.
+test_turn_end_reconciliation_shapes() {
+  local dir state fakebin out drain_out reason key sent
+
+  # Endpoint gone, no terminal status: escalate immediately with the task id and
+  # a recovery recommendation. The retained worktree mirrors the orphan incident.
+  dir=$(make_supercase turn-end-endpoint-gone)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; drain_out="$dir/drain.out"
+  mkdir -p "$dir/worktree" "$dir/data/cv-v2-shared-master-a1"
+  printf 'window=fixture:w1:p1\nbackend=herdr\nworktree=%s\nkind=ship\n' "$dir/worktree" \
+    > "$state/cv-v2-shared-master-a1.meta"
+  printf 'durable implementation report\n' > "$dir/data/cv-v2-shared-master-a1/report.md"
+  : > "$state/cv-v2-shared-master-a1.turn-ended"
+  touch -t 202001010000 "$state/cv-v2-shared-master-a1.turn-ended"
+  FM_CREW_STATE_BIN=$(make_fake_crew_state "$fakebin")
+  export FM_CREW_STATE_BIN
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validation still active · endpoint: gone'
+  run_watcher_once "$state" "$fakebin" "$out" || fail "watcher did not surface the endpoint-gone turn-end"
+  reason=$(<"$out")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after endpoint-gone turn-end failed"
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  grep -F 'task cv-v2-shared-master-a1' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "endpoint-gone turn-end did not escalate with its task id"
+  grep -F 'endpoint gone' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "endpoint-gone turn-end did not describe the lost endpoint"
+  grep -F 'recommended recovery:' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "endpoint-gone turn-end did not recommend recovery"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "endpoint-gone turn-end was buffered more than once"
+  sent="$dir/sent.log"; : > "$sent"; : > "$dir/pane.txt"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "endpoint-gone recovery digest did not flush"
+  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "endpoint-gone recovery digest was not submitted exactly once"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "endpoint-gone recovery buffer was not cleared after delivery"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "endpoint-gone recovery was rebuffered after delivery"
+  [ -s "$dir/data/cv-v2-shared-master-a1/report.md" ] || fail "isolated durable report was lost during recovery routing"
+
+  # Endpoint alive but idle, no terminal status: surface the unfinished task for
+  # inspection and continuation instead of treating the turn-end as routine.
+  dir=$(make_supercase turn-end-idle)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; drain_out="$dir/drain.out"
+  mkdir -p "$dir/worktree"
+  printf 'window=fixture:w1:p2\nbackend=herdr\nworktree=%s\nkind=ship\n' "$dir/worktree" \
+    > "$state/cv-v2-po-pilot-recover-n3.meta"
+  : > "$state/cv-v2-po-pilot-recover-n3.turn-ended"
+  FM_CREW_STATE_BIN=$(make_fake_crew_state "$fakebin")
+  export FM_CREW_STATE_BIN
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available · endpoint: alive'
+  run_watcher_once "$state" "$fakebin" "$out" || fail "watcher did not surface the idle turn-end"
+  reason=$(<"$out")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after idle turn-end failed"
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  grep -F 'task cv-v2-po-pilot-recover-n3' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "idle turn-end did not escalate with its task id"
+  grep -F 'endpoint alive but idle' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "idle turn-end did not describe the live idle endpoint"
+  grep -F 'recommended action:' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "idle turn-end did not recommend continuation"
+
+  # A terminal status remains on the existing status-dedup path even when its
+  # turn-end marker coalesces into the same wake.
+  dir=$(make_supercase turn-end-terminal)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'done: ready in branch fm/cv-sw-control-g1\n' > "$state/cv-sw-control-g1.status"
+  : > "$state/cv-sw-control-g1.turn-ended"
+  run_watcher_once "$state" "$fakebin" "$out" || fail "watcher did not surface the terminal turn-end"
+  reason=$(<"$out")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after terminal turn-end failed"
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "terminal turn-end did not produce exactly one deduplicated escalation"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "terminal turn-end was duplicated by the catch-all scan"
+
+  # A declared external pause is retained for its bounded long-cadence recheck.
+  # It must not be escalated as an orphan merely because the turn ended idle.
+  dir=$(make_supercase turn-end-paused)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; drain_out="$dir/drain.out"
+  mkdir -p "$dir/worktree"
+  printf 'window=fixture:w1:p3\nbackend=herdr\nworktree=%s\nkind=ship\n' "$dir/worktree" \
+    > "$state/cv-v2-po-pilot-audit-q5.meta"
+  printf 'paused: awaiting the declared external release\n' > "$state/cv-v2-po-pilot-audit-q5.status"
+  : > "$state/cv-v2-po-pilot-audit-q5.turn-ended"
+  FM_CREW_STATE_BIN=$(make_fake_crew_state "$fakebin")
+  export FM_CREW_STATE_BIN
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the declared external release · endpoint: alive'
+  run_watcher_once "$state" "$fakebin" "$out" || fail "watcher did not route the paused turn-end"
+  reason=$(<"$out")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after paused turn-end failed"
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "declared external pause was escalated as an orphan"
+  key=$(printf '%s' 'cv-v2-po-pilot-audit-q5' | tr ':/.' '___')
+  [ -e "$state/.subsuper-paused-$key" ] || fail "declared external pause did not retain bounded recheck tracking"
+
+  unset FM_FAKE_CREW_STATE
+  pass "turn-ended reconciliation covers endpoint gone, idle unfinished, terminal done, and declared external pause"
 }
 
 # --- Phase 2: stale working-pane transient -> persistent -> resumed ----------
@@ -146,4 +256,5 @@ test_stale_pane_transient_persistent_resume() {
 }
 
 test_routine_then_terminal_after_restart
+test_turn_end_reconciliation_shapes
 test_stale_pane_transient_persistent_resume

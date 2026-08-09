@@ -92,11 +92,14 @@ test_daemon_state_root_uses_fm_home() {
 }
 
 test_classify_routine_signal_self() {
-  local dir state out
+  local dir state fakebin crew_state out
   dir=$(make_supercase classify-routine)
-  state="$dir/state"
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
   printf 'working: step 1\nworking: step 2\n' > "$state/foo-x1.status"
-  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/foo-x1.status" "$state")
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    classify_signal "$state/foo-x1.status" "$state")
   case "$out" in self\|*) pass "routine signal self-handles" ;; *) fail "routine signal did not self-handle: $out" ;; esac
 }
 
@@ -186,15 +189,18 @@ test_handle_wake_paused_records_pause_marker() {
 }
 
 test_handle_wake_paused_signal_records_pause_marker() {
-  local dir state key win
+  local dir state fakebin crew_state key win
   dir=$(make_supercase handle-paused-signal)
-  state="$dir/state"
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
   win="sess:fm-held-w10-signal"
   printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-signal.meta"
   printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10-signal.status"
   key=$(printf '%s' "held-w10-signal" | tr ':/.' '___')
   date +%s > "$state/.subsuper-stale-$key"
-  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held-w10-signal.status" "$state"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the vendor rate-limit reset' \
+    handle_wake "signal: $state/held-w10-signal.status" "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "pause signal did not record a pause marker"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "pause signal did not clear the wedge marker"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a declared pause signal escalated instead of self-handling"
@@ -591,11 +597,14 @@ test_heartbeat_scan_skips_orphaned_status() {
 }
 
 test_handle_wake_routes_self_and_escalate() {
-  local dir state
+  local dir state fakebin crew_state
   dir=$(make_supercase handle)
-  state="$dir/state"
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
   printf 'working\n' > "$state/h-routine.status"
-  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/h-routine.status" "$state"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating' \
+    handle_wake "signal: $state/h-routine.status" "$state"
   [ -s "$state/.subsuper-escalations" ] && fail "routine signal was escalated by handle_wake"
   printf 'done: PR 1\n' > "$state/h-done.status"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/h-done.status" "$state"

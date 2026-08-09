@@ -100,6 +100,7 @@ make_fake_crew_state() {  # <fakebin>
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = --reconcile ]; then shift; fi
 id=${1:-}
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"

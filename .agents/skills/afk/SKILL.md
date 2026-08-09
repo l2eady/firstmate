@@ -119,14 +119,18 @@ The daemon wraps `fm-watch.sh`, runs the watcher as a child, classifies each
 wake reason in bash, and self-handles the routine majority without consuming a
 firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
-The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
+The classification predicates (the captain-relevant verb set, declared-pause vocabulary, bounded current-state reconciliation, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
 While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
 
 Classify each wake this way:
 
-- `signal` whose status content has no captain-relevant verb
+- `signal` with a captain-relevant status verb
   (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
-  -> self-handle. Captain-relevant verb -> escalate.
+  -> escalate on the existing deduplicated status path.
+- `signal` with no captain-relevant verb, including a bare turn-end -> run one bounded `fm-crew-state.sh` reconciliation per referenced task through the shared classifier.
+  Positive run-step or busy-pane evidence -> self-handle.
+  A declared external pause -> self-handle and retain its bounded pause recheck.
+  A stopped, idle, uncertain, or endpoint-gone task -> escalate immediately with its task id, current-state evidence, and recommended continuation or recovery action.
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.

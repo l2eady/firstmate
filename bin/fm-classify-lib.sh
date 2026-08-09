@@ -142,20 +142,32 @@ signal_reason_is_actionable() {  # <file> ...
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id> [<state>]
-  local id=$1 state_dir=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} line state src
-  [ -n "$id" ] || { printf 'none'; return; }
-  # A task with no state/<id>.meta is GONE, not idle. Asking fm-crew-state.sh
-  # about it yields `unknown`, which reads as "not provably working" and would
-  # surface a wake for a crew that no longer exists - the .turn-ended twin of the
-  # orphaned-.status problem, since a bare turn-end marker carries no verb and so
-  # is decided entirely here. Absorb it: there is nothing left to wake for.
-  if [ -n "$state_dir" ] && [ -d "$state_dir" ] && [ ! -e "$state_dir/$id.meta" ]; then
-    printf 'orphan'
-    return
-  fi
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+# Read one canonical current-state line for a crew. Keeping this read separate
+# from the parser lets signal reconciliation use the same bounded lookup once per
+# task while retaining the full detail needed for a recovery recommendation.
+crew_state_line() {  # <id>
+  local id=$1 line
+  [ -n "$id" ] || return 0
+  line=$("$FM_CREW_STATE_BIN" --reconcile "$id" 2>/dev/null) || true
+  printf '%s\n' "$line" | head -1
+}
+
+# 0 when task <id> has no state/<id>.meta under <state>, i.e. the task is GONE
+# rather than idle. Asking fm-crew-state.sh about it yields `unknown`, which
+# reads as "not provably working" and would surface a wake for a crew that no
+# longer exists - the .turn-ended twin of the orphaned-.status problem, since a
+# bare turn-end marker carries no verb. An unresolvable state dir is never an
+# orphan verdict: absence of evidence is not evidence the task is gone.
+task_is_orphan() {  # <state> <id>
+  [ -n "$1" ] && [ -d "$1" ] && [ ! -e "$1/$2.meta" ]
+}
+
+# Pure parser for one fm-crew-state.sh line. This is the single mapping from the
+# current-state reader onto the working/paused/none absorb vocabulary.
+crew_absorb_class_from_line() {  # <state-line>
+  local line=$1 state src
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
+  case "$line" in *'endpoint: gone'*|*'endpoint: unknown'*) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
@@ -163,6 +175,16 @@ crew_absorb_class() {  # <id> [<state>]
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
   printf 'none'
+}
+
+crew_absorb_class() {  # <id> [<state>]
+  local id=$1 state_dir=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} line
+  [ -n "$id" ] || { printf 'none'; return; }
+  # A gone task is absorbed before any live-state read: there is nothing left to
+  # wake for, and the read would only report `unknown`.
+  if task_is_orphan "$state_dir" "$id"; then printf 'orphan'; return; fi
+  line=$(crew_state_line "$id")
+  crew_absorb_class_from_line "$line"
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
@@ -183,34 +205,119 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
-# 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is either
-# provably working or an orphan whose task is gone; 1 (actionable/surface) if any is
-# neither, or no task can be resolved. Pass the same space-separated file list as
-# signal_reason_is_actionable. Files are mapped to task ids by stripping the
-# .status / .turn-ended suffix; a no-verb wake with nothing absorbable must surface,
-# so an empty/unresolvable list returns 1.
-signal_crew_provably_working() {  # <file> ...
-  local f base task seen="" dir
+# Describe the recovery action for a no-verb signal whose crew is neither
+# provably working nor deliberately paused. The caller already performed one
+# bounded current-state read, so this is a pure formatting decision over that
+# evidence. It deliberately carries the task id and distinguishes a lost
+# endpoint from a live idle endpoint.
+signal_reconciliation_detail() {  # <id> <state-line> <turn-end|status-signal>
+  local task=$1 line=$2 context=$3 state phrase
+  if [ "$context" = turn-end ]; then
+    phrase='after turn end with no terminal status'
+  else
+    phrase='after a no-verb status wake without a terminal status'
+  fi
+  case "$line" in
+    *'endpoint: gone'*|*'backend target gone:'*)
+      printf 'task %s endpoint gone %s (%s); recommended recovery: resume or relaunch from recorded metadata and worktree, then continue supervision' \
+        "$task" "$phrase" "${line:-state unreadable}"
+      return
+      ;;
+    *'no backend target recorded'*|*'no metadata for '*|*'worktree gone'*)
+      printf 'task %s has incomplete recorded state %s (%s); recommended recovery: reconcile its metadata and worktree before resume or safe teardown' \
+        "$task" "$phrase" "${line:-state unreadable}"
+      return
+      ;;
+    *'source: status-log'*|*'no current-state source available'*)
+      printf 'task %s endpoint alive but idle %s (%s); recommended action: inspect and continue the unfinished task' \
+        "$task" "$phrase" "${line:-state unreadable}"
+      return
+      ;;
+  esac
+  state=${line#state: }; state=${state%% *}
+  case "$state" in
+    done)
+      printf 'task %s reports done %s (%s); recommended action: record completion and continue the existing delivery or safe teardown path' \
+        "$task" "$phrase" "${line:-state unreadable}"
+      ;;
+    *)
+      printf 'task %s needs reconciliation %s (%s); recommended action: inspect live state and continue or recover the task' \
+        "$task" "$phrase" "${line:-state unreadable}"
+      ;;
+  esac
+}
+
+# Reconcile every unique task referenced by a no-verb signal using exactly one
+# fm-crew-state.sh read per task. Prints one decision record:
+#   working|...    every task has positive active-work evidence, or is gone;
+#   paused|...     every task is absorbable and at least one is deliberately paused;
+#   actionable|... at least one task stopped, lost its endpoint, or is uncertain.
+# The actionable detail includes each affected task id and the recommended next
+# step so away-mode batching can surface a useful recovery instruction without a
+# second live-state read. The always-on watcher consumes the same decision through
+# signal_crew_provably_working below, keeping one classification owner.
+signal_crew_reconciliation() {  # <file> ...
+  local f base task seen="" turn_ended="" orphans="" dir line class overall=working
+  local details="" item context
+  local -a tasks
   for f in "$@"; do
     base=${f##*/}
     case "$base" in
       *.status)     task=${base%.status} ;;
-      *.turn-ended) task=${base%.turn-ended} ;;
+      *.turn-ended) task=${base%.turn-ended}
+                    case " $turn_ended " in *" $task "*) ;; *) turn_ended="$turn_ended $task" ;; esac ;;
       *)            continue ;;
     esac
     [ -n "$task" ] || continue
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
     # Resolve the state dir from the signal file itself, so an absolute path in a
-    # wake reason is classified against the home that actually owns it.
+    # wake reason is classified against the home that actually owns it. A task
+    # with no meta there is gone, so it is absorbed without a live-state read.
     dir=${f%/*}
-    case "$(crew_absorb_class "$task" "$dir")" in
-      working|orphan) ;;
-      *) return 1 ;;
+    if task_is_orphan "$dir" "$task"; then orphans="$orphans $task"; fi
+  done
+  if [ -z "$seen" ]; then
+    printf 'actionable|signal did not resolve a task; recommended action: inspect the queued wake and reconcile its task metadata'
+    return
+  fi
+  read -r -a tasks <<<"$seen"
+  for task in "${tasks[@]}"; do
+    # A gone task has nothing to reconcile and nobody to wake for.
+    case " $orphans " in *" $task "*) continue ;; esac
+    line=$(crew_state_line "$task")
+    class=$(crew_absorb_class_from_line "$line")
+    case "$class" in
+      working) ;;
+      paused)
+        [ "$overall" = actionable ] || overall=paused
+        ;;
+      *)
+        overall=actionable
+        context=status-signal
+        case " $turn_ended " in *" $task "*) context=turn-end ;; esac
+        item=$(signal_reconciliation_detail "$task" "$line" "$context")
+        details="${details}${details:+ | }${item}"
+        ;;
     esac
   done
-  [ -n "$seen" ] || return 1
-  return 0
+  case "$overall" in
+    working) printf 'working|all referenced tasks are provably working or gone:%s' "$seen" ;;
+    paused)  printf 'paused|all referenced tasks are working or in a declared external pause:%s' "$seen" ;;
+    *)       printf 'actionable|%s' "$details" ;;
+  esac
+}
+
+# 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is
+# provably working or gone; 1 (actionable/surface) if any is paused, stopped,
+# uncertain, or cannot be resolved. A normal-mode declared pause intentionally
+# surfaces its initial signal; away mode consumes the richer paused decision above
+# and tracks the bounded pause recheck.
+signal_crew_provably_working() {  # <file> ...
+  case "$(signal_crew_reconciliation "$@")" in
+    working\|*) return 0 ;;
+  esac
+  return 1
 }
 
 # 0 (terminal/actionable) if a stale window's last status line is
