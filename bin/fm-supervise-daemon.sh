@@ -738,10 +738,15 @@ reconcile_pending_discard() {  # <state>
   rm -f "$(_reconcile_pending_file "$1")"
 }
 
-# Absent fields are written as a placeholder: tab is IFS whitespace, so `read`
-# would collapse consecutive separators and shift every later field left.
+# NUL-delimited, four fields per record. Two of them are crew-authored free text
+# (a status line, and a detail quoting it), so any in-band separator a status
+# line can legally contain - a tab, a newline - would shift the parse and store a
+# truncated status or an unmatchable detail: the first re-escalates the terminal
+# the catch-all was meant to stop repeating, the second re-escalates the same
+# reconciliation on every later wake. A NUL cannot occur in either value, so
+# every field round-trips exactly and an absent one stays empty.
 reconcile_pending_stage() {  # <state> <task> <window> <terminal-status> <detail>
-  printf '%s\t%s\t%s\t%s\n' "$2" "${3:--}" "${4:--}" "$5" >> "$(_reconcile_pending_file "$1")"
+  printf '%s\0%s\0%s\0%s\0' "$2" "${3:-}" "${4:-}" "$5" >> "$(_reconcile_pending_file "$1")"
 }
 
 # Commit every staged intent. mark_status_seen runs FIRST because it clears the
@@ -752,10 +757,13 @@ reconcile_pending_commit() {  # <state>
   local state=$1 f task win last detail
   f=$(_reconcile_pending_file "$state")
   [ -s "$f" ] || { rm -f "$f"; return 0; }
-  while IFS="$(printf '\t')" read -r task win last detail; do
+  while IFS= read -r -d '' task &&
+        IFS= read -r -d '' win &&
+        IFS= read -r -d '' last &&
+        IFS= read -r -d '' detail; do
     [ -n "$task" ] || continue
-    [ "$last" = - ] || mark_status_seen "$state" "$task" "$last"
-    [ "$win" = - ] || endpoint_mark_surfaced "$state" "$win"
+    [ -z "$last" ] || mark_status_seen "$state" "$task" "$last"
+    [ -z "$win" ] || endpoint_mark_surfaced "$state" "$win"
     mark_reconcile_seen "$state" "$task" "$detail"
   done < "$f"
   rm -f "$f"

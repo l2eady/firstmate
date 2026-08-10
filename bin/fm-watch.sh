@@ -405,9 +405,9 @@ surface_nonterminal_stale() {  # <window> <hash>
 ENDPOINT_MISS_POLLS=${FM_ENDPOINT_MISS_POLLS:-2}
 case "$ENDPOINT_MISS_POLLS" in ''|*[!0-9]*) ENDPOINT_MISS_POLLS=2 ;; esac
 # How recent the previous miss must be to still count as the same run. A poll
-# does not necessarily probe every window: any wake exits the process, so every
-# window after it goes unprobed, and under afk a queued signal skips the window
-# loop entirely. A count with no recency check would therefore let one transient
+# does not necessarily probe every window: a confirmed loss wakes and exits from
+# inside the liveness pass, so every window after it goes unprobed that cycle.
+# A count with no recency check would therefore let one transient
 # blip sit for hours and pair with an unrelated later one to "confirm" a loss for
 # a crew that is alive - so each miss records when it happened, and a gap wider
 # than a few polls starts the run over.
@@ -449,6 +449,32 @@ endpoint_miss_record() {  # <window> <task> [last-status-line] [kind]
   fm_wake_append check "endpoint-$key" "$reason" || exit 1
   : > "$STATE/.endpoint-surfaced-$key"
   wake "$reason"
+}
+
+# This poll's endpoint probe, kept so the stale layer below can reuse the capture
+# the liveness pass already took: probing earlier must not double the per-poll
+# round trips. Parallel indexed arrays keep this portable to the same bash the
+# rest of bin/ targets, and a fleet is a handful of windows, so the scan is short.
+ENDPOINT_WINS=()
+ENDPOINT_TAILS=()
+ENDPOINT_PROBED=0
+
+endpoint_cache_put() {  # <window> <capture>
+  ENDPOINT_WINS[$ENDPOINT_PROBED]=$1
+  ENDPOINT_TAILS[$ENDPOINT_PROBED]=$2
+  ENDPOINT_PROBED=$(( ENDPOINT_PROBED + 1 ))
+}
+
+endpoint_cache_get() {  # <window>; prints this poll's capture, non-zero if unreadable
+  local i=0
+  while [ "$i" -lt "$ENDPOINT_PROBED" ]; do
+    if [ "${ENDPOINT_WINS[$i]}" = "$1" ]; then
+      printf '%s' "${ENDPOINT_TAILS[$i]}"
+      return 0
+    fi
+    i=$(( i + 1 ))
+  done
+  return 1
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -561,6 +587,26 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # Endpoint liveness, evaluated BEFORE the signal scan for the same reason the
+  # slow checks below are: wake() exits the cycle, so a probe placed after the
+  # scan is skipped on every poll a chatty sibling crewmate signals, and under
+  # afk every signal wakes. A crew whose endpoint died can never signal again, so
+  # it would only be probed on the polls its siblings happened to stay quiet, and
+  # ENDPOINT_MISS_GAP would expire the run between them - the loss could go
+  # unconfirmed indefinitely, which is exactly the orphan this check exists to
+  # break. Each capture is cached for the stale layer, so the pane is still read
+  # once per window per poll and the ordinary hash work stays where it was.
+  ENDPOINT_PROBED=0
+  while IFS= read -r w; do
+    if tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      endpoint_cache_put "$w" "$tail40"
+      endpoint_miss_clear "$w"
+    else
+      task=$(window_to_task "$w" "$STATE")
+      endpoint_miss_record "$w" "$task" "$(last_status_line "$STATE/$task.status")" "$(window_kind "$w")"
+    fi
+  done < <(recorded_windows)
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -653,16 +699,14 @@ EOF
     if ! status_is_paused "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
-    # Endpoint liveness runs BEFORE the secondmate skip. That skip exists because
-    # an idle secondmate PANE is healthy, which is a different condition from a
-    # DEAD endpoint: a secondmate whose endpoint dies takes its whole subtree
-    # unsupervised, and the only other detector is the session-start liveness
-    # sweep, which a long away-mode stretch never reaches.
-    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
-      endpoint_miss_record "$w" "$task" "$last" "$kind"
-      continue
-    fi
-    endpoint_miss_clear "$w"
+    # A window with no cached capture had an unreadable endpoint this poll: the
+    # prepass already counted the miss, and there is no pane to hash. That pass
+    # deliberately runs ahead of the secondmate skip below, because that skip
+    # exists for an idle secondmate PANE being healthy, which is a different
+    # condition from a DEAD endpoint - a secondmate whose endpoint dies takes its
+    # whole subtree unsupervised, and the only other detector is the
+    # session-start liveness sweep, which a long away-mode stretch never reaches.
+    tail40=$(endpoint_cache_get "$w") || continue
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi

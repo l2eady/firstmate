@@ -167,11 +167,12 @@ task_is_orphan() {  # <state> <id>
 crew_absorb_class_from_line() {  # <state-line>
   local line=$1 state src endpoint
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
+  # The dedicated field is the only authority. An empty field means the line
+  # recorded none at all (a non-reconcile read), which is not grounds to absorb
+  # or to refuse; the state decides from here.
   endpoint=$(crew_state_endpoint_field "$line")
   case "$endpoint" in
-    alive) ;;
     gone|unknown) printf 'none'; return ;;
-    *) case "$line" in *'endpoint: gone'*|*'endpoint: unknown'*) printf 'none'; return ;; esac ;;
   esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
@@ -287,8 +288,19 @@ signal_reconciliation_detail() {  # <state> <id> <state-line> <turn-end|status-s
         "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
       return ;;
     parked)
-      printf 'task %s is parked on a pending decision %s (%s); last reported: %s; recommended action: surface that decision and answer it so the task can resume' \
-        "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
+      # `parked` covers two owners, and the line already carries the evidence.
+      # A needs-decision status log, or a run gate marked ask-user, is the
+      # captain's to answer; a run parked at awaiting_approval/fix_review with no
+      # such marker is owed by the CREW itself, so asking the captain for it
+      # would relay a decision they do not own while the crew idle-waits.
+      case "$line" in
+        *'(ask-user: captain decision)'*|*'source: status-log'*)
+          printf 'task %s is parked on a pending decision %s (%s); last reported: %s; recommended action: surface that decision and answer it so the task can resume' \
+            "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}" ;;
+        *)
+          printf 'task %s is parked at a validation gate it owes the response to %s (%s); last reported: %s; recommended action: steer the crew to answer that gate so its run continues' \
+            "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}" ;;
+      esac
       return ;;
     blocked)
       printf 'task %s reports blocked %s (%s); last reported: %s; recommended action: surface the blocker and resolve it, or relay it for a decision, so the task can resume' \

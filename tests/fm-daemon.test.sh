@@ -1156,6 +1156,42 @@ test_reconciliation_frames_a_retired_blocker_as_a_blocker() {
   pass "a reconciliation that retires a blocked status frames it as a blocker, once"
 }
 
+test_reconciliation_suppression_survives_a_tabbed_status_line() {
+  # Status lines are crew-authored free text, so a pasted table fragment can put
+  # a tab in the very line a reconciliation retires. Staging that through a
+  # separator the value can itself contain truncates the recorded status - the
+  # catch-all then re-escalates the terminal - and stores an unmatchable detail,
+  # so the identical reconciliation repeats on every later turn-end wake.
+  local dir state fakebin crew_state tabbed fakeline
+  dir=$(make_supercase reconcile-tabbed-status)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  tabbed=$(printf 'blocked: needs\tcolumn\taccess granted')
+  fakeline=$(printf 'state: blocked · source: status-log · needs\tcolumn\taccess · endpoint: alive')
+  printf '%s\n' "$tabbed" > "$state/tab-t1.status"
+  : > "$state/tab-t1.turn-ended"
+
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE="$fakeline" \
+    handle_wake "signal: $state/tab-t1.turn-ended" "$state"
+  grep -F 'task tab-t1 reports blocked' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the tab-bearing blocker was never escalated: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+
+  # The status it retired must be recorded whole, or the catch-all repeats it.
+  FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+  [ "$(grep -cF 'access granted' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "a tab truncated the retired status, so the catch-all repeated it: $(cat "$state/.subsuper-escalations")"
+
+  # And the staged detail must round-trip, or the same reconciliation re-fires.
+  : > "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE="$fakeline" \
+    handle_wake "signal: $state/tab-t1.turn-ended" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "the identical reconciliation repeated after a tab-bearing status: $(cat "$state/.subsuper-escalations")"
+  pass "a tab in a crew-authored status line cannot break reconciliation suppression"
+}
+
 test_housekeeping_append_failure_preserves_detector_state() {
   # escalate_add reports a lost append; every housekeeping caller must withhold
   # the bookkeeping that would retire the event, or the digest loses it forever.
@@ -2347,6 +2383,7 @@ test_classify_signal_reconciliation_respects_escalated_terminal
 test_reconciliation_before_catch_all_marks_the_terminal_seen
 test_reconciliation_carries_the_terminal_it_retires
 test_reconciliation_frames_a_retired_blocker_as_a_blocker
+test_reconciliation_suppression_survives_a_tabbed_status_line
 test_housekeeping_append_failure_preserves_detector_state
 test_housekeeping_pause_recheck_append_failure_keeps_the_window
 test_failed_escalate_append_withholds_suppression

@@ -329,6 +329,27 @@ test_signal_reconciliation_detail_frames_each_captain_state() {
     *'continue the unfinished task'*) fail "parked guidance framed a pending decision as routine work: $out" ;;
   esac
 
+  # `parked` has two owners. A run parked at its own validation gate is owed by
+  # the CREW, so relaying it as a captain decision asks for an answer the captain
+  # does not own while the crew idle-waits.
+  out=$(signal_reconciliation_detail "$state" parked-s4 \
+    'state: parked · source: run-step · parked at review: 2 finding(s) · endpoint: alive' turn-end)
+  case "$out" in
+    *'answer that gate'*) ;;
+    *) fail "an agent-owed validation gate was not pointed back at the crew: $out" ;;
+  esac
+  case "$out" in
+    *'surface that decision'*) fail "an agent-owed gate was relayed as the captain's decision: $out" ;;
+  esac
+
+  # The same run-step gate marked ask-user IS the captain's.
+  out=$(signal_reconciliation_detail "$state" parked-s5 \
+    'state: parked · source: run-step · parked at review: 1 finding(s) (ask-user: captain decision) · endpoint: alive' turn-end)
+  case "$out" in
+    *'surface that decision'*) ;;
+    *) fail "an ask-user gate was not surfaced as the captain's decision: $out" ;;
+  esac
+
   out=$(signal_reconciliation_detail "$state" blocked-s2 \
     'state: blocked · source: status-log · waiting on captain credentials · endpoint: alive' turn-end)
   case "$out" in
@@ -1005,6 +1026,57 @@ test_endpoint_wake_not_suppressed_when_the_queue_append_fails() {
   pass "a failed durable enqueue leaves the endpoint episode unsuppressed so it surfaces on recovery"
 }
 
+test_endpoint_loss_confirmed_while_siblings_keep_signalling() {
+  # A wake exits the poll, so an endpoint probe evaluated after the signal scan
+  # is skipped on every poll a chatty sibling crewmate signals - and under afk
+  # every signal wakes. The crew whose endpoint died can never signal again, so
+  # it would only ever be probed on the polls its siblings happened to stay
+  # quiet, and the miss run would expire between them.
+  local dir state fakebin pane out window key pid misses
+  dir=$(make_case endpoint-starved); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; pane="$dir/pane.txt"
+  window="test:fm-orphan-s5"
+  printf 'building\nesc to interrupt\n' > "$pane"
+  date '+%s' > "$state/.afk"   # away mode: the daemon owns triage, so every signal wakes
+  # A sibling whose status keeps changing, so a signal is pending on every poll.
+  printf 'window=test:fm-chatty-c5\nkind=ship\n' > "$state/chatty-c5.meta"
+  printf 'working: building\n' > "$state/chatty-c5.status"
+  # The orphan: its endpoint is dead and its own status is already surfaced, so
+  # nothing but the liveness probe can reach it again.
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/orphan-s5.meta"
+  printf 'working: implementing\n' > "$state/orphan-s5.status"
+  printf '%s' "$(seen_sig "$state/orphan-s5.status")" > "$state/.seen-orphan-s5_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_TMUX_CAPTURE_FAIL_TARGETS="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_GAP=3600 FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "the watcher never handled the sibling's signal"
+  grep -F "signal:" "$out" >/dev/null || fail "the sibling's signal was not the wake: $(cat "$out")"
+  misses=$(cut -d' ' -f1 "$state/.endpoint-miss-$key" 2>/dev/null || echo 0)
+  [ "$misses" -ge 1 ] \
+    || fail "the dead endpoint went unprobed on a poll the sibling's signal ended (got '$misses')"
+
+  # A second poll, again ended by a sibling signal: the miss run must still reach
+  # the threshold and surface the orphan.
+  printf 'working: still building\n' >> "$state/chatty-c5.status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_TMUX_CAPTURE_FAIL_TARGETS="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_GAP=3600 FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch2.out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "the starved endpoint loss was never confirmed"
+  grep -F "check: endpoint $window" "$dir/watch2.out" >/dev/null \
+    || fail "a chatty sibling starved the dead endpoint out of being surfaced: $(cat "$dir/watch2.out")"
+  grep -F "task orphan-s5" "$dir/watch2.out" >/dev/null \
+    || fail "the starved endpoint wake lost its task id"
+  pass "a dead endpoint is still confirmed while a sibling keeps the signal scan busy"
+}
+
 test_secondmate_unreadable_endpoint_surfaces() {
   # A secondmate's IDLE PANE is healthy, which is why stale-pane wakes skip it -
   # but a DEAD endpoint is a different condition, and it takes the secondmate's
@@ -1664,6 +1736,7 @@ test_stale_miss_does_not_pair_with_a_later_blip
 test_secondmate_endpoint_wake_names_its_home
 test_every_lost_endpoint_surfaces_independently
 test_endpoint_wake_not_suppressed_when_the_queue_append_fails
+test_endpoint_loss_confirmed_while_siblings_keep_signalling
 test_secondmate_unreadable_endpoint_surfaces
 test_secondmate_idle_pane_still_absorbed
 test_nonterminal_stale_paused_absorbed_then_resurfaced
