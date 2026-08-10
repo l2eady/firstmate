@@ -723,12 +723,50 @@ reconcile_status_already_escalated() {  # <state> <task>
   [ "$(cat "$state/.subsuper-seen-status-$(_stale_key "$task")" 2>/dev/null || true)" = "$last" ]
 }
 
+# --- one-wake pending suppression intents -----------------------------------
+# Classification runs inside a command substitution, so a hook cannot hand
+# anything back to handle_wake except through a file. Suppression markers must
+# not become authoritative before the escalation is actually buffered - the
+# ordering bin/fm-watch.sh already uses - or a lost append silences the very
+# orphan this check exists to break. So the hook STAGES its marker writes here
+# and handle_wake commits them only after escalate_add succeeds.
+_reconcile_pending_file() {  # <state>
+  printf '%s/.subsuper-reconcile-pending' "$1"
+}
+
+reconcile_pending_discard() {  # <state>
+  rm -f "$(_reconcile_pending_file "$1")"
+}
+
+# Absent fields are written as a placeholder: tab is IFS whitespace, so `read`
+# would collapse consecutive separators and shift every later field left.
+reconcile_pending_stage() {  # <state> <task> <window> <terminal-status> <detail>
+  printf '%s\t%s\t%s\t%s\n' "$2" "${3:--}" "${4:--}" "$5" >> "$(_reconcile_pending_file "$1")"
+}
+
+# Commit every staged intent. mark_status_seen runs FIRST because it clears the
+# reconcile marker; staging the task's current captain-relevant status here is
+# what stops the catch-all scan from re-reporting a completion this wake already
+# quoted in its own `last reported:` field.
+reconcile_pending_commit() {  # <state>
+  local state=$1 f task win last detail
+  f=$(_reconcile_pending_file "$state")
+  [ -s "$f" ] || { rm -f "$f"; return 0; }
+  while IFS="$(printf '\t')" read -r task win last detail; do
+    [ -n "$task" ] || continue
+    [ "$last" = - ] || mark_status_seen "$state" "$task" "$last"
+    [ "$win" = - ] || endpoint_mark_surfaced "$state" "$win"
+    mark_reconcile_seen "$state" "$task" "$detail"
+  done < "$f"
+  rm -f "$f"
+}
+
 # The dedupe seam bin/fm-classify-lib.sh's signal_crew_reconciliation calls per
-# task. It performs marker bookkeeping only and prints the detail to carry, or
-# nothing when this task is already covered; the classification and the
-# wake-level fold stay in the library.
+# task. It reads the authoritative markers, stages the writes this wake would
+# make, and prints the detail to carry - or nothing when this task is already
+# covered; the classification and the wake-level fold stay in the library.
 reconcile_task_dedupe_hook() {  # <task> <class> <detail>
-  local task=$1 class=$2 detail=$3 state=${FM_RECONCILE_HOOK_STATE:-} win
+  local task=$1 class=$2 detail=$3 state=${FM_RECONCILE_HOOK_STATE:-} win="" last=""
   [ -n "$state" ] || { printf '%s' "$detail"; return; }
   case "$class" in
     working|paused)
@@ -745,10 +783,11 @@ reconcile_task_dedupe_hook() {  # <task> <class> <detail>
     win=$(task_endpoint "$state" "$task")
     if [ -n "$win" ]; then
       endpoint_already_surfaced "$state" "$win" && return
-      endpoint_mark_surfaced "$state" "$win"
     fi
   fi
-  mark_reconcile_seen "$state" "$task" "$detail"
+  last=$(last_status_line "$state/$task.status")
+  status_is_captain_relevant "$last" || last=""
+  reconcile_pending_stage "$state" "$task" "$win" "$last" "$detail"
   printf '%s' "$detail"
 }
 
@@ -851,11 +890,14 @@ stale_window_is_busy() {  # <window> <state>
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
+# Non-zero when the item could not be appended (full or read-only state dir), so
+# a caller can withhold suppression markers and leave the event eligible for a
+# later retry rather than losing it silently.
 escalate_add() {  # <state> <distilled-item>
   local state=$1 item=$2 buf
   buf="$state/.subsuper-escalations"
-  [ -s "$buf" ] || _now > "${buf}.since"
-  printf '%s\n' "$item" >> "$buf"
+  [ -s "$buf" ] || _now > "${buf}.since" || true
+  printf '%s\n' "$item" >> "$buf" || return 1
 }
 
 # Flush the escalation buffer as ONE batched, single-line digest to the
@@ -1449,6 +1491,7 @@ handle_wake() {  # <reason> <state>
     log "wake force-self (FM_INJECT_SKIP): $reason"
     return
   fi
+  reconcile_pending_discard "$state"
   case "$reason" in
     signal:*) kind=signal; arg="${reason#signal: }"
               decision=$(classify_signal "$arg" "$state") ;;
@@ -1464,18 +1507,27 @@ handle_wake() {  # <reason> <state>
   case "$action" in
     escalate)
       log "escalate: $reason -> $distilled"
-      escalate_add "$state" "$distilled"
-      # A terminal-stale escalate must not leave a persistence marker behind, or
-      # housekeeping re-escalates the same pane as a false wedge later.
-      [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
-      mark_escalated_seen "$kind" "$arg" "$state"
-      [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+      if escalate_add "$state" "$distilled"; then
+        # A terminal-stale escalate must not leave a persistence marker behind, or
+        # housekeeping re-escalates the same pane as a false wedge later.
+        [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
+        mark_escalated_seen "$kind" "$arg" "$state"
+        reconcile_pending_commit "$state"
+        [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+      else
+        # The buffer append failed, so nothing reached the digest. Withhold every
+        # suppression marker: the event stays eligible for the next wake instead
+        # of being silenced by bookkeeping for an escalation that never happened.
+        log "escalate FAILED to buffer (state dir unwritable?): $reason -> $distilled"
+        reconcile_pending_discard "$state"
+      fi
       ;;
     pause)
       # Declared external-wait pause: record a pause marker (long re-surface
       # cadence in housekeeping) and drop any wedge stale marker, so a pane that
       # transitioned working->paused is not still wedge-aged. Only stale produces
       # this action.
+      reconcile_pending_discard "$state"
       if [ "$kind" = "stale" ]; then
         stale_marker_remove "$arg" "$state"
         pause_marker_record "$arg" "$state"
@@ -1483,6 +1535,7 @@ handle_wake() {  # <reason> <state>
       log "self-handle (paused): $reason -> $distilled"
       ;;
     *)
+      reconcile_pending_discard "$state"
       # Transient (non-terminal) stale: record/refresh the wedge marker so
       # housekeeping can age it, and drop any pause marker (a crew that left its
       # pause reverts to normal wedge aging). The persistence recheck, not this

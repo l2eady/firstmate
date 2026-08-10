@@ -980,45 +980,51 @@ test_classify_signal_mixed_wake_drops_already_escalated_status() {
 test_classify_signal_reconciliation_dedup() {
   # The reconciliation escalation path has no status line for the status seen
   # marker to record, so it keeps its own. Regression: an unchanged verdict must
-  # not re-inject the same digest on every later turn-end wake.
-  local dir state fakebin crew_state out key
+  # not re-inject the same digest on every later turn-end wake. Driven through
+  # handle_wake because the dedupe marker only becomes authoritative once the
+  # escalation has actually been buffered.
+  local dir state fakebin crew_state key buffered
   dir=$(make_supercase signal-reconcile-dedup)
   state="$dir/state"; fakebin="$dir/fakebin"
   crew_state=$(make_fake_crew_state "$fakebin")
   : > "$state/recon-dup-r7.turn-ended"
   key=$(printf '%s' "recon-dup-r7" | tr ':/.' '___')
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
     FM_FAKE_CREW_STATE='state: done · source: run-step · outcome: checks-passed' \
-    classify_signal "$state/recon-dup-r7.turn-ended" "$state")
-  case "$out" in escalate\|*) ;; *) fail "first reconciliation did not escalate: $out" ;; esac
-  assert_contains "$out" "task recon-dup-r7 reports done" "first reconciliation lost the task detail"
+    handle_wake "signal: $state/recon-dup-r7.turn-ended" "$state"
+  grep -F 'task recon-dup-r7 reports done' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "first reconciliation was not escalated: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
   [ -e "$state/.subsuper-seen-reconcile-$key" ] || fail "first reconciliation recorded no dedupe marker"
+  buffered=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
 
   # Same unchanged verdict on the next turn-end: self-handle, no second digest.
-  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
     FM_FAKE_CREW_STATE='state: done · source: run-step · outcome: checks-passed' \
-    classify_signal "$state/recon-dup-r7.turn-ended" "$state")
-  case "$out" in self\|*) ;; *) fail "unchanged reconciliation re-escalated: $out" ;; esac
+    handle_wake "signal: $state/recon-dup-r7.turn-ended" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq "$buffered" ] \
+    || fail "unchanged reconciliation re-escalated: $(cat "$state/.subsuper-escalations")"
 
   # A changed verdict is a new fact and must surface again.
-  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
     FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-recon-dup-r7 · endpoint: gone' \
-    classify_signal "$state/recon-dup-r7.turn-ended" "$state")
-  case "$out" in escalate\|*) ;; *) fail "a changed reconciliation verdict was suppressed: $out" ;; esac
+    handle_wake "signal: $state/recon-dup-r7.turn-ended" "$state"
+  grep -F 'task recon-dup-r7 endpoint gone' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a changed reconciliation verdict was suppressed: $(cat "$state/.subsuper-escalations")"
 
   # Recovering to provably-working clears the marker, so a later recurrence of
   # the earlier verdict is never swallowed.
-  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
     FM_FAKE_CREW_STATE='state: working · source: run-step · validating' \
-    classify_signal "$state/recon-dup-r7.turn-ended" "$state")
-  case "$out" in self\|*) ;; *) fail "recovered crew did not self-handle: $out" ;; esac
+    handle_wake "signal: $state/recon-dup-r7.turn-ended" "$state"
   [ ! -e "$state/.subsuper-seen-reconcile-$key" ] || fail "recovery did not clear the reconciliation dedupe marker"
-  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+  : > "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
     FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-recon-dup-r7 · endpoint: gone' \
-    classify_signal "$state/recon-dup-r7.turn-ended" "$state")
-  case "$out" in escalate\|*) ;; *) fail "a recurrence after recovery was swallowed: $out" ;; esac
-  pass "classify_signal deduplicates unchanged reconciliation verdicts without swallowing recurrences"
+    handle_wake "signal: $state/recon-dup-r7.turn-ended" "$state"
+  grep -F 'task recon-dup-r7 endpoint gone' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a recurrence after recovery was swallowed: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  pass "reconciliation deduplicates unchanged verdicts without swallowing recurrences"
 }
 
 test_classify_signal_reconciliation_respects_escalated_terminal() {
@@ -1057,6 +1063,73 @@ test_classify_signal_reconciliation_respects_escalated_terminal() {
   case "$out" in escalate\|*) ;; *) fail "a lost endpoint after the status moved on was suppressed: $out" ;; esac
   assert_contains "$out" "task term-t3 endpoint gone" "the resumed escalation lost its recovery detail"
   pass "reconciliation defers to an already-escalated terminal status without swallowing later divergence"
+}
+
+test_reconciliation_before_catch_all_marks_the_terminal_seen() {
+  # /afk can start the daemon after a crew already reported done, so no seen
+  # marker exists yet. A bare turn-end then reconciles FIRST and quotes that
+  # completion in its own "last reported:" field. Regression: the catch-all scan
+  # must not then buffer a second entry for the same completion.
+  local dir state fakebin crew_state
+  dir=$(make_supercase reconcile-before-catchall)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  printf 'done: PR https://x/y/pull/41 checks green\n' > "$state/first-f1.status"
+  : > "$state/first-f1.turn-ended"
+
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-first-f1 · endpoint: gone' \
+    handle_wake "signal: $state/first-f1.turn-ended" "$state"
+  grep -F 'task first-f1 endpoint gone' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the reconciliation escalation was not buffered: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "the reconciliation wake buffered more than one entry"
+
+  FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "the catch-all scan duplicated a completion reconciliation already reported: $(cat "$state/.subsuper-escalations")"
+  pass "a reconciliation that quotes a terminal status marks it seen so the catch-all cannot repeat it"
+}
+
+test_failed_escalate_append_withholds_suppression() {
+  # Suppression must never outlive a lost append. If the buffer write fails, the
+  # digest never got the item, so every seen/endpoint marker has to be withheld
+  # and the same wake must still escalate once the buffer is writable again.
+  local dir state fakebin crew_state key wkey
+  dir=$(make_supercase escalate-append-fails)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/lost-l1.meta" "window=sess:fm-lost-l1" "kind=ship"
+  printf 'done: PR https://x/y/pull/42 checks green\n' > "$state/lost-l1.status"
+  : > "$state/lost-l1.turn-ended"
+  key=$(printf '%s' "lost-l1" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-lost-l1" | tr ':/.' '___')
+  # A directory cannot be appended to as a file, so the buffer write fails
+  # exactly as a full or read-only state dir would.
+  mkdir -p "$state/.subsuper-escalations"
+
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-lost-l1 · endpoint: gone' \
+    handle_wake "signal: $state/lost-l1.turn-ended" "$state" 2>/dev/null
+  [ ! -e "$state/.subsuper-seen-reconcile-$key" ] \
+    || fail "a failed append still recorded the reconciliation dedupe marker"
+  [ ! -e "$state/.endpoint-surfaced-$wkey" ] \
+    || fail "a failed append still claimed the shared endpoint episode"
+  [ ! -e "$state/.subsuper-seen-status-$key" ] \
+    || fail "a failed append still marked the terminal status seen"
+
+  # Buffer writable again: the same event must still reach the digest.
+  rmdir "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-lost-l1 · endpoint: gone' \
+    handle_wake "signal: $state/lost-l1.turn-ended" "$state"
+  grep -F 'task lost-l1 endpoint gone' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the retried event never reached the digest: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ -e "$state/.subsuper-seen-reconcile-$key" ] \
+    || fail "a successful append did not record the reconciliation dedupe marker"
+  [ -e "$state/.endpoint-surfaced-$wkey" ] \
+    || fail "a successful append did not claim the shared endpoint episode"
+  pass "a failed escalation append withholds every suppression marker and stays retryable"
 }
 
 test_classify_signal_skips_torn_down_task_files() {
@@ -1227,12 +1300,14 @@ test_reconciliation_endpoint_loss_shares_the_episode_record() {
   : > "$state/orphan-r4.turn-ended"
   wkey=$(printf '%s' "sess:fm-orphan-r4" | tr ':/.' '___')
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
     FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-orphan-r4 · endpoint: gone' \
-    classify_signal "$state/orphan-r4.turn-ended" "$state")
-  case "$out" in escalate\|*) ;; *) fail "a lost endpoint was not escalated by reconciliation: $out" ;; esac
+    handle_wake "signal: $state/orphan-r4.turn-ended" "$state"
+  grep -F 'task orphan-r4 endpoint gone' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a lost endpoint was not escalated by reconciliation: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
   [ -e "$state/.endpoint-surfaced-$wkey" ] \
     || fail "reconciliation escalated a lost endpoint without recording the shared episode"
+  : > "$state/.subsuper-escalations"
 
   # The daemon's stale recheck must now defer to it rather than repeat it.
   local key
@@ -1244,10 +1319,11 @@ test_reconciliation_endpoint_loss_shares_the_episode_record() {
     || fail "the stale recheck repeated an endpoint loss reconciliation already surfaced: $(cat "$state/.subsuper-escalations")"
 
   # A crew that reconciles as working again ends the episode's miss run.
-  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
     FM_FAKE_CREW_STATE='state: working · source: run-step · validating · endpoint: alive' \
-    classify_signal "$state/orphan-r4.turn-ended" "$state")
-  case "$out" in self\|*) ;; *) fail "a recovered crew did not self-handle: $out" ;; esac
+    handle_wake "signal: $state/orphan-r4.turn-ended" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a recovered crew was escalated: $(cat "$state/.subsuper-escalations")"
   [ ! -e "$state/.subsuper-endpoint-miss-$wkey" ] \
     || fail "a crew reconciling as working left its endpoint miss run in place"
   pass "no-verb reconciliation participates in the shared endpoint-loss episode record"
@@ -2135,6 +2211,8 @@ test_classify_signal_mixed_wake_reconciles_the_other_task
 test_classify_signal_mixed_wake_drops_already_escalated_status
 test_classify_signal_reconciliation_dedup
 test_classify_signal_reconciliation_respects_escalated_terminal
+test_reconciliation_before_catch_all_marks_the_terminal_seen
+test_failed_escalate_append_withholds_suppression
 test_classify_signal_skips_torn_down_task_files
 test_housekeeping_unreadable_endpoint_escalates
 test_housekeeping_recovered_endpoint_resets_miss_count

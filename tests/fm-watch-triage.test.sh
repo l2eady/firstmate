@@ -736,7 +736,7 @@ test_unreadable_endpoint_surfaces_once_per_episode() {
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_ENDPOINT_MISS_GAP=3600 FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 60 || fail "watcher never surfaced a recorded endpoint that stayed unreadable"
@@ -754,7 +754,7 @@ test_unreadable_endpoint_surfaces_once_per_episode() {
   # Same unreadable endpoint on later polls: already surfaced, so no second wake.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_ENDPOINT_MISS_GAP=3600 FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch2.out" &
   pid=$!
   if ! wait_live "$pid" 30; then
@@ -777,7 +777,7 @@ test_transient_capture_failure_absorbed() {
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_ENDPOINT_MISS_POLLS=99 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_ENDPOINT_MISS_GAP=3600 FM_ENDPOINT_MISS_POLLS=99 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 30; then
@@ -850,7 +850,7 @@ test_secondmate_endpoint_wake_names_its_home() {
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_ENDPOINT_MISS_GAP=3600 FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 60 || fail "a dead secondmate endpoint was never surfaced"
@@ -885,7 +885,7 @@ test_every_lost_endpoint_surfaces_independently() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_FAKE_TMUX_CAPTURE_FAIL_TARGETS="test:fm-seq-d1" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_ENDPOINT_MISS_GAP=3600 FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 60 || fail "the first lost endpoint was never surfaced"
@@ -895,7 +895,7 @@ test_every_lost_endpoint_surfaces_independently() {
   # Later the second one dies too, so now EVERY recorded endpoint is unreadable.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_ENDPOINT_MISS_GAP=3600 FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch2.out" &
   pid=$!
   wait_for_exit "$pid" 60 || fail "the second lost endpoint was never surfaced"
@@ -928,7 +928,7 @@ test_endpoint_wake_not_suppressed_when_the_queue_append_fails() {
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_ENDPOINT_MISS_GAP=3600 FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
   pid=$!
   wait_for_exit "$pid" 60; status=$?
@@ -941,7 +941,7 @@ test_endpoint_wake_not_suppressed_when_the_queue_append_fails() {
   rmdir "$state/.wake-queue.seq"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_ENDPOINT_MISS_GAP=3600 FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch2.out" &
   pid=$!
   wait_for_exit "$pid" 60 || fail "the endpoint stayed silent after the queue recovered"
@@ -967,7 +967,7 @@ test_secondmate_unreadable_endpoint_surfaces() {
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_ENDPOINT_MISS_GAP=3600 FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 60 || fail "a secondmate whose endpoint died was never surfaced"
@@ -991,7 +991,7 @@ test_secondmate_idle_pane_still_absorbed() {
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_STALE_ESCALATE_SECS=1 \
+    FM_ENDPOINT_MISS_GAP=3600 FM_ENDPOINT_MISS_POLLS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_STALE_ESCALATE_SECS=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 40; then
