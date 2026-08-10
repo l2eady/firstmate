@@ -707,7 +707,15 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
 # (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
 # recognized after a bordered composer row has already been structurally found.
-FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
+# Written as an ALTERNATION of whole glyphs, never a bracket expression: a
+# bracket set of multibyte glyphs is locale-dependent, and under a C/POSIX
+# LC_CTYPE (the default when a home runs with no LANG set) grep reads it as a
+# set of BYTES, so every box-drawing glyph - which shares the leading 0xE2 byte
+# - matched the bare shape. The composer box's own bottom border then won as
+# the last match and its "Composer" caption read as pending, wedging away-mode
+# injection behind a composer that was actually empty. Alternation matches the
+# whole byte sequence in either locale.
+FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›)'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped

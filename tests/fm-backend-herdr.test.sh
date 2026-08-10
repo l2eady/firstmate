@@ -877,6 +877,40 @@ test_composer_state_unknown_on_capture_failure() {
   pass "fm_backend_herdr_composer_state: reports unknown when the pane cannot be captured"
 }
 
+# The classifier must reach the same verdict whatever LC_CTYPE the home runs
+# under. A firstmate started with no LANG set inherits the C/POSIX locale, where
+# grep reads a bracket expression of multibyte glyphs as a set of BYTES and bash
+# `?` matches one BYTE: the bare-prompt shape then matched every box-drawing
+# glyph (they all lead with 0xE2), so the composer box's own bottom border won
+# as the last match and read as pending, and a partly-stripped agent glyph left
+# the idle placeholder unrecognizable. Both shapes read pending on an empty
+# composer, which is exactly what wedges away-mode injection. Pin the locales
+# rather than trusting the ambient one, so the regression cannot hide behind a
+# UTF-8 test host.
+test_composer_state_is_locale_invariant() {
+  local dir log resp fb out loc locales=C
+  dir="$TMP_ROOT/composer-locale"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"
+  fb=$(make_herdr_fakebin "$dir")
+  locale -a 2>/dev/null | grep -qx 'en_US.UTF-8' && locales="$locales en_US.UTF-8"
+  for loc in $locales; do
+    # bordered empty composer, ghost placeholder, and real typed text
+    : > "$log"; rm -f "$resp/.count"
+    printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ─────╯\n' > "$resp/1.out"
+    printf '  ╭────────────────────────╮\n  │ ❯ Type a message...    │\n  ╰──────── Composer ─────╯\n' > "$resp/2.out"
+    printf '  ╭────────────────────────╮\n  │ ❯ hello captain        │\n  ╰──────── Composer ─────╯\n' > "$resp/3.out"
+    out=$( PATH="$fb:$PATH" LC_ALL="$loc" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    [ "$out" = empty ] || fail "under LC_ALL=$loc a bare prompt glyph should read as empty, got '$out'"
+    out=$( PATH="$fb:$PATH" LC_ALL="$loc" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    [ "$out" = empty ] || fail "under LC_ALL=$loc the ghost placeholder should read as empty, got '$out'"
+    out=$( PATH="$fb:$PATH" LC_ALL="$loc" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    [ "$out" = pending ] || fail "under LC_ALL=$loc real typed text should still read as pending, got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: empty/ghost/pending verdicts are locale-invariant (C and UTF-8)"
+}
+
 test_composer_state_unknown_when_no_composer_row_found() {
   local dir log resp fb out glyph idx=1
   dir="$TMP_ROOT/composer-no-row"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -1714,6 +1748,7 @@ test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
+test_composer_state_is_locale_invariant
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins

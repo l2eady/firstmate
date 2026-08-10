@@ -954,6 +954,41 @@ test_malformed_cadence_overrides_do_not_kill_the_watcher() {
   pass "malformed cadence overrides fall back to their defaults instead of killing the watcher"
 }
 
+test_fractional_cadence_overrides_are_honoured() {
+  # Both cadences are spent on `sleep`, which takes fractional seconds, so a
+  # sub-second override is legal and must survive sanitization intact. Rejecting
+  # it as "not an integer" silently stretched the cycle to the 15s default,
+  # which no caller could observe except as a watcher that had stopped reacting.
+  # Confirming a lost endpoint takes TWO probe cycles, so a run that finishes
+  # well inside the default poll proves the fractional cadence was really used.
+  local dir state fakebin out window pid started elapsed
+  dir=$(make_case cadence-fractional); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-orphan-f1"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/orphan-f1.meta"
+  printf 'working: implementing\n' > "$state/orphan-f1.status"
+  printf '%s' "$(seen_sig "$state/orphan-f1.status")" > "$state/.seen-orphan-f1_status"
+
+  started=$(date '+%s')
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=0.2 FM_ENDPOINT_MISS_POLLS=2 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>"$dir/watch.err" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a fractional cadence was not honoured; the watcher never completed two probe cycles: $(cat "$dir/watch.err")"
+  elapsed=$(( $(date '+%s') - started ))
+  [ "$elapsed" -lt 10 ] \
+    || fail "the fractional cadence was replaced by a slower default (two cycles took ${elapsed}s)"
+  grep -F "check: endpoint $window" "$out" >/dev/null \
+    || fail "the watcher did not surface the lost endpoint under a fractional cadence: $(cat "$out")"
+  # The derived miss window is integer arithmetic, so a sub-second cadence must
+  # round UP into a usable span rather than truncate the run to zero length.
+  grep -F "task orphan-f1" "$out" >/dev/null \
+    || fail "the fractional-cadence endpoint wake did not carry its task id"
+  pass "fractional cadence overrides are preserved for sleep and rounded up for the derived miss window"
+}
+
 test_miss_run_survives_a_full_signal_bearing_cycle() {
   # Consecutive probes of one window are a whole CYCLE apart, and a cycle that
   # carries a signal lingers FM_SIGNAL_GRACE and then sleeps FM_POLL before the
@@ -1830,6 +1865,7 @@ test_transient_capture_failure_absorbed
 test_stale_miss_does_not_pair_with_a_later_blip
 test_miss_run_survives_a_full_signal_bearing_cycle
 test_malformed_cadence_overrides_do_not_kill_the_watcher
+test_fractional_cadence_overrides_are_honoured
 test_secondmate_endpoint_wake_names_its_home
 test_every_lost_endpoint_surfaces_independently
 test_endpoint_wake_not_suppressed_when_the_queue_append_fails

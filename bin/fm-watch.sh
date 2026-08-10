@@ -114,16 +114,42 @@ fi
 # mistyped operator override rather than a portability quirk. Killing the
 # supervision backbone at startup over a typo is worse than the documented
 # default, and zero stays a legal value.
-POLL=${FM_POLL:-15}                   # seconds between cycles
-case "$POLL" in ''|*[!0-9]*) POLL=15 ;; esac
+#
+# Both values are spent on `sleep`, which takes a fractional seconds argument,
+# so a nonnegative DECIMAL (FM_POLL=0.2 for a tight test or debug cadence) is a
+# legal override and must survive intact - rejecting it would silently stretch
+# the cycle to the 15s default. Only the derived window below needs an integer,
+# so it takes a ceiling of the sanitized value instead of constraining what the
+# operator may set.
+cadence_or_default() {  # <value> <default> -> nonnegative decimal seconds
+  case "$1" in
+    ''|.|*[!0-9.]*|*.*.*) printf '%s' "$2" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+cadence_ceiling() {  # <nonnegative decimal seconds> -> whole seconds, rounded up
+  local whole frac
+  case "$1" in
+    *.*)
+      whole=${1%%.*}; frac=${1#*.}
+      case "$frac" in
+        *[1-9]*) printf '%s' "$(( ${whole:-0} + 1 ))" ;;
+        *) printf '%s' "${whole:-0}" ;;
+      esac ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+POLL=$(cadence_or_default "${FM_POLL:-15}" 15)   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
-SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
+SIGNAL_GRACE=$(cadence_or_default "${FM_SIGNAL_GRACE:-30}" 30)
+                                      # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
-case "$SIGNAL_GRACE" in ''|*[!0-9]*) SIGNAL_GRACE=30 ;; esac
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
 # grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a
@@ -422,8 +448,12 @@ case "$ENDPOINT_MISS_POLLS" in ''|*[!0-9]*) ENDPOINT_MISS_POLLS=2 ;; esac
 # gap of a few polls would expire mid-run on any signalling fleet, so a dead
 # endpoint would restart its run on every pass and never confirm. A confirmed
 # loss also wakes and exits from inside the liveness pass, leaving every later
-# window unprobed that cycle, which the same several-cycle span absorbs.
-ENDPOINT_MISS_GAP_DEFAULT=$(( (POLL + SIGNAL_GRACE) * 3 ))
+# window unprobed that cycle, which the same several-cycle span absorbs. The
+# cadences are rounded UP to whole seconds here: this window is integer
+# arithmetic, and a sub-second cadence must widen the window rather than
+# truncate to a zero-length cycle.
+ENDPOINT_MISS_GAP_DEFAULT=$(( $(cadence_ceiling "$POLL") + $(cadence_ceiling "$SIGNAL_GRACE") ))
+ENDPOINT_MISS_GAP_DEFAULT=$(( ENDPOINT_MISS_GAP_DEFAULT * 3 ))
 [ "$ENDPOINT_MISS_GAP_DEFAULT" -ge 3 ] || ENDPOINT_MISS_GAP_DEFAULT=3
 ENDPOINT_MISS_GAP=${FM_ENDPOINT_MISS_GAP:-$ENDPOINT_MISS_GAP_DEFAULT}
 case "$ENDPOINT_MISS_GAP" in ''|*[!0-9]*) ENDPOINT_MISS_GAP=$ENDPOINT_MISS_GAP_DEFAULT ;; esac
