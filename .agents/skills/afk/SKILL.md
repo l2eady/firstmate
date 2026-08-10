@@ -144,6 +144,11 @@ Classify each wake this way:
   possible wedge. This bounds wedge-detection latency to the threshold plus a
   tick: a delay, never a loss. Healthy crewmates are autonomous and do not wait
   on firstmate mid-task.
+  If the window's endpoint becomes unreadable while that wedge timer is running,
+  the recheck escalates it as endpoint loss with the same recovery wording rather
+  than dropping the marker, once the same consecutive-miss threshold the watcher
+  uses confirms it, and shares the one per-episode record so only the detector
+  that gets there first reports it.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
   captain-relevant status line the per-wake classifier might miss.
@@ -212,6 +217,13 @@ These properties must hold:
 
 - Nothing is lost. The durable queue plus `fm-wake-drain.sh` recover any missed
   or crashed injection.
+- Suppression follows delivery. Every seen-status, reconciliation, endpoint-episode,
+  wedge, and pause-window marker is written only after the escalation is really
+  buffered, so a state dir that cannot accept the append leaves the event eligible
+  for the next wake instead of silencing it with bookkeeping for a digest that was
+  never produced.
+- An in-flight task whose endpoint dies is still surfaced, even though it can no
+  longer write a status line or a turn-end marker.
 - Wedge detection is bounded-latency, not lossy.
 - Declared external waits are rechecked on a separate, bounded cadence rather than being mislabeled as wedges.
 - The catch-all scan backs up the keyword classifier.

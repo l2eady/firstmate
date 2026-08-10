@@ -596,6 +596,12 @@ The agent prompt glyphs `❯` (claude) and `›` (codex) read `empty` either way
 Per-backend dead-shell coverage: `tests/fm-daemon.test.sh`'s `test_tmux_composer_state_bare_shell_is_unknown` and `test_inject_msg_defers_on_dead_shell_unknown` (tmux + the injector), `tests/fm-backend-herdr.test.sh`'s `test_composer_state_unknown_when_no_composer_row_found`, `tests/fm-backend-orca.test.sh`'s `test_composer_state_bare_shell_prompt_is_unknown`, and `tests/fm-backend-cmux.test.sh`'s `test_composer_state_unknown_when_no_composer_row_found`.
 The herdr incident regressions (`tests/fm-backend-herdr.test.sh`'s composer-state, wait-for-working, and send-text-submit sections) stay green, and `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` passes clean.
 
+**Locale safety.** Every multibyte glyph the composer read matches must be written as a whole-glyph literal or alternation, never as a bracket expression or a `?`/`??` character count.
+A firstmate home started with no `LANG` set inherits the C/POSIX `LC_CTYPE`, where both constructs operate on BYTES: a bracket set of agent glyphs then matched every box-drawing glyph (they share a leading byte), so the composer box's own border won the bottom-most bare-prompt match, and a `?`-based prefix strip removed only part of a glyph so the placeholder behind it could never re-match its idle pattern.
+Either way an empty composer read as `pending`, which is precisely what wedges away-mode injection.
+`FM_BACKEND_HERDR_BARE_PROMPT_RE` and `fm_composer_classify_content`'s prompt-glyph strip are both written this way; an operator override of that variable must be too (see [`docs/configuration.md`](configuration.md)).
+`tests/fm-backend-herdr.test.sh`'s `test_composer_state_is_locale_invariant` pins the empty/ghost/pending verdicts under both `LC_ALL=C` and `en_US.UTF-8`.
+
 ## Incident (2026-07-10): away-mode injection wedged all night on the primary claude-on-herdr composer's ghost text
 
 The captain woke to find away-mode had never injected: 20 escalations buffered, the max-defer wedge marker at 30623s undelivered, the wake queue at 65.
