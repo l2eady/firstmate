@@ -1293,14 +1293,23 @@ housekeeping() {  # <state>
            endpoint_miss_reset "$state" "$win"
            rm -f "$marker"
          elif endpoint_loss_confirmed "$state" "$win"; then
-           escalate_add "$state" "task $task endpoint unreadable after ${age}s idle ($win); last reported: ${last:-no status}; recommended recovery: $(endpoint_recovery_advice "$(task_kind "$state" "$task")")"
-           endpoint_mark_surfaced "$state" "$win"
-           endpoint_miss_reset "$state" "$win"
-           rm -f "$marker"
+           # Claim the shared episode and drop the wedge timer ONLY once the item
+           # is really buffered; otherwise the marker would silence the watcher's
+           # own detector for an escalation the digest never received.
+           if escalate_add "$state" "task $task endpoint unreadable after ${age}s idle ($win); last reported: ${last:-no status}; recommended recovery: $(endpoint_recovery_advice "$(task_kind "$state" "$task")")"; then
+             endpoint_mark_surfaced "$state" "$win"
+             endpoint_miss_reset "$state" "$win"
+             rm -f "$marker"
+           else
+             log "escalate FAILED to buffer (state dir unwritable?): endpoint loss for $task ($win); episode left unclaimed for retry"
+           fi
          fi ;;
       *) endpoint_miss_reset "$state" "$win"
-         escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-         stale_marker_remove "$win" "$state" ;;
+         if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
+           stale_marker_remove "$win" "$state"
+         else
+           log "escalate FAILED to buffer (state dir unwritable?): wedge for $win; stale marker kept for retry"
+         fi ;;
     esac
   done
 
@@ -1333,8 +1342,13 @@ housekeeping() {  # <state>
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_paused "$last"; then
-          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
-          _now > "$marker"
+          # Reset the re-surface window only on a real append, or the recheck the
+          # captain never saw would not come round again for another full window.
+          if escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"; then
+            _now > "$marker"
+          else
+            log "escalate FAILED to buffer (state dir unwritable?): pause recheck for $win; window left aged for retry"
+          fi
         else
           rm -f "$marker"
         fi
@@ -1353,8 +1367,13 @@ housekeeping() {  # <state>
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
-      escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
-      mark_status_seen "$state" "$task" "$last"
+      # Retire the status only on a real append: marking it seen after a lost
+      # write would drop a captain-relevant terminal that never reached anyone.
+      if escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"; then
+        mark_status_seen "$state" "$task" "$last"
+      else
+        log "escalate FAILED to buffer (state dir unwritable?): catch-all $task; status left unseen for retry"
+      fi
     done < <(scan_captain_relevant_statuses "$state")
   fi
 }

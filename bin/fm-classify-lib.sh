@@ -245,6 +245,11 @@ signal_reconciliation_detail() {  # <state> <id> <state-line> <turn-end|status-s
   # reported done before the daemon started has no seen-status marker yet, and
   # asserting it never reported would point away mode at relaunching finished
   # work.
+  #
+  # EVERY branch quotes that line verbatim, because escalating one of these
+  # details is what retires the status for the catch-all scan. A branch that
+  # suppressed the scan without carrying the text would drop the completion's PR
+  # URL or the decision's actual question out of the digest entirely.
   last=$(last_status_line "$sdir/$task.status")
   if [ "$context" = turn-end ]; then
     phrase='after turn end'
@@ -265,8 +270,8 @@ signal_reconciliation_detail() {  # <state> <id> <state-line> <turn-end|status-s
   fi
   case "$line" in
     *'no backend target recorded'*|*'no metadata for '*|*'worktree gone'*)
-      printf 'task %s has incomplete recorded state %s (%s); recommended recovery: reconcile its metadata and worktree before resume or safe teardown' \
-        "$task" "$phrase" "${line:-state unreadable}"
+      printf 'task %s has incomplete recorded state %s (%s); last reported: %s; recommended recovery: reconcile its metadata and worktree before resume or safe teardown' \
+        "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
       return
       ;;
   esac
@@ -275,19 +280,19 @@ signal_reconciliation_detail() {  # <state> <id> <state-line> <turn-end|status-s
   # unfinished task to continue would contradict the very line it quotes - and
   # away mode acts on this text, not on operator prose.
   if [ "$state" = done ]; then
-    printf 'task %s reports done %s (%s); recommended action: record completion and continue the existing delivery or safe teardown path' \
-      "$task" "$phrase" "${line:-state unreadable}"
+    printf 'task %s reports done %s (%s); last reported: %s; recommended action: record completion and continue the existing delivery or safe teardown path' \
+      "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
     return
   fi
   case "$line" in
     *'source: status-log'*|*'no current-state source available'*)
-      printf 'task %s endpoint alive but idle %s (%s); recommended action: inspect and continue the unfinished task' \
-        "$task" "$phrase" "${line:-state unreadable}"
+      printf 'task %s endpoint alive but idle %s (%s); last reported: %s; recommended action: inspect and continue the unfinished task' \
+        "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
       return
       ;;
   esac
-  printf 'task %s needs reconciliation %s (%s); recommended action: inspect live state and continue or recover the task' \
-    "$task" "$phrase" "${line:-state unreadable}"
+  printf 'task %s needs reconciliation %s (%s); last reported: %s; recommended action: inspect live state and continue or recover the task' \
+    "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
 }
 
 # Map one wake file onto the task it belongs to. Prints nothing for a path that

@@ -1091,6 +1091,111 @@ test_reconciliation_before_catch_all_marks_the_terminal_seen() {
   pass "a reconciliation that quotes a terminal status marks it seen so the catch-all cannot repeat it"
 }
 
+test_reconciliation_carries_the_terminal_it_retires() {
+  # Marking a status seen retires it for the catch-all scan, so the escalation
+  # that does the marking has to carry that exact text. Regression: a `done` (or
+  # decision) reconciliation whose live-state line does NOT repeat the status
+  # note must still put the crew's own report - PR URL and all - in the digest.
+  local dir state fakebin crew_state
+  dir=$(make_supercase reconcile-carries-terminal)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  printf 'done: PR https://github.com/o/r/pull/41 checks green\n' > "$state/carry-c1.status"
+  : > "$state/carry-c1.turn-ended"
+
+  # The run-step read reports done WITHOUT the status-log note, so the PR URL
+  # exists only in the status line the escalation is about to retire.
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review · endpoint: alive' \
+    handle_wake "signal: $state/carry-c1.turn-ended" "$state"
+  grep -F 'https://github.com/o/r/pull/41' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the digest lost the completion's PR URL: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+
+  # And it is retired exactly once: the catch-all must not repeat it.
+  FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+  [ "$(grep -c 'https://github.com/o/r/pull/41' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "the retired completion was duplicated by the catch-all: $(cat "$state/.subsuper-escalations")"
+
+  # Same shape for a decision: the question itself must survive.
+  printf 'needs-decision: which auth provider?\n' > "$state/carry-c2.status"
+  : > "$state/carry-c2.turn-ended"
+  : > "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s) · endpoint: alive' \
+    handle_wake "signal: $state/carry-c2.turn-ended" "$state"
+  grep -F 'which auth provider?' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the digest lost the decision's question: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  pass "a reconciliation that retires a captain-relevant status carries that status text"
+}
+
+test_housekeeping_append_failure_preserves_detector_state() {
+  # escalate_add reports a lost append; every housekeeping caller must withhold
+  # the bookkeeping that would retire the event, or the digest loses it forever.
+  local dir state fakebin key wkey pane
+  dir=$(make_supercase housekeeping-append-fails)
+  state="$dir/state"; fakebin="$dir/fakebin"; pane="$dir/pane.txt"
+  printf 'idle prompt\n' > "$pane"
+  fm_write_meta "$state/nospc-n1.meta" "window=sess:fm-nospc-n1" "kind=ship"
+  printf 'working: building\n' > "$state/nospc-n1.status"
+  fm_write_meta "$state/nospc-n2.meta" "window=sess:fm-nospc-n2" "kind=ship"
+  printf 'done: PR https://x/y/pull/51 checks green\n' > "$state/nospc-n2.status"
+  key=$(printf '%s' "nospc-n1" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-nospc-n1" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  # A directory cannot be appended to as a file, so every append fails.
+  mkdir -p "$state/.subsuper-escalations"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 \
+    FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state" 2>/dev/null
+  [ ! -e "$state/.endpoint-surfaced-$wkey" ] \
+    || fail "a failed append still claimed the shared endpoint episode"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "a failed append still dropped the wedge marker"
+  [ ! -e "$state/.subsuper-seen-status-$(printf '%s' "nospc-n2" | tr ':/.' '___')" ] \
+    || fail "a failed catch-all append still retired the terminal status"
+
+  # Buffer writable again: both events still reach the digest.
+  rmdir "$state/.subsuper-escalations"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 \
+    FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+  grep -F 'task nospc-n1 endpoint unreadable' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the retried endpoint loss never reached the digest: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  grep -F 'https://x/y/pull/51' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the retried catch-all status never reached the digest: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  pass "a failed housekeeping append preserves every detector's state for retry"
+}
+
+test_housekeeping_pause_recheck_append_failure_keeps_the_window() {
+  # The pause re-surface resets its window on escalation. A lost append must not
+  # reset it, or the recheck the captain never saw waits another full window.
+  local dir state fakebin key pane before
+  dir=$(make_supercase pause-append-fails)
+  state="$dir/state"; fakebin="$dir/fakebin"; pane="$dir/pane.txt"
+  printf 'idle prompt\n' > "$pane"
+  fm_write_meta "$state/held-p1.meta" "window=sess:fm-held-p1" "kind=ship"
+  printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-p1.status"
+  key=$(printf '%s' "held-p1" | tr ':/.' '___')
+  before=$(( $(date +%s) - 5000 ))
+  echo "$before" > "$state/.subsuper-paused-$key"
+  mkdir -p "$state/.subsuper-escalations"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state" 2>/dev/null
+  [ "$(cat "$state/.subsuper-paused-$key")" = "$before" ] \
+    || fail "a failed append still reset the pause re-surface window"
+
+  rmdir "$state/.subsuper-escalations"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  grep -F 'awaiting external, recheck whether the wait still holds' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the retried pause recheck never reached the digest: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ "$(cat "$state/.subsuper-paused-$key")" != "$before" ] \
+    || fail "a successful pause recheck did not reset its window"
+  pass "a failed pause-recheck append keeps its window aged for retry"
+}
+
 test_failed_escalate_append_withholds_suppression() {
   # Suppression must never outlive a lost append. If the buffer write fails, the
   # digest never got the item, so every seen/endpoint marker has to be withheld
@@ -2212,6 +2317,9 @@ test_classify_signal_mixed_wake_drops_already_escalated_status
 test_classify_signal_reconciliation_dedup
 test_classify_signal_reconciliation_respects_escalated_terminal
 test_reconciliation_before_catch_all_marks_the_terminal_seen
+test_reconciliation_carries_the_terminal_it_retires
+test_housekeeping_append_failure_preserves_detector_state
+test_housekeeping_pause_recheck_append_failure_keeps_the_window
 test_failed_escalate_append_withholds_suppression
 test_classify_signal_skips_torn_down_task_files
 test_housekeeping_unreadable_endpoint_escalates
