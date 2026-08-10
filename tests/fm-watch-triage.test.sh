@@ -868,10 +868,11 @@ test_transient_capture_failure_absorbed() {
 }
 
 test_stale_miss_does_not_pair_with_a_later_blip() {
-  # A poll does not necessarily probe every window - any wake exits the process,
-  # and under afk a queued signal skips the window loop entirely - so a bare
-  # count would let one old transient blip pair with an unrelated later one and
-  # "confirm" a loss for a crew that is alive. Only back-to-back misses count.
+  # The liveness pass runs ahead of the signal scan, but a confirmed loss still
+  # wakes and exits from inside it, leaving every later window unprobed that
+  # cycle - so a bare count would let one old transient blip pair with an
+  # unrelated later one and "confirm" a loss for a crew that is alive. Only
+  # misses inside one run window count, which this pins small on purpose.
   local dir state fakebin out window key pid misses
   dir=$(make_case endpoint-stale-miss); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
@@ -908,6 +909,57 @@ test_stale_miss_does_not_pair_with_a_later_blip() {
   grep -F "check: endpoint $window" "$dir/watch2.out" >/dev/null \
     || fail "the confirmed loss was not surfaced: $(cat "$dir/watch2.out")"
   pass "an old miss cannot pair with a later blip, while back-to-back misses still confirm"
+}
+
+test_miss_run_survives_a_full_signal_bearing_cycle() {
+  # Consecutive probes of one window are a whole CYCLE apart, and a cycle that
+  # carries a signal lingers FM_SIGNAL_GRACE and then sleeps FM_POLL before the
+  # next liveness pass. With the run window sized in polls rather than cycles, a
+  # dead endpoint on a fleet whose siblings keep signalling restarts its run on
+  # every pass and never confirms. This case deliberately uses the shipped
+  # default gap, so the default itself is what is under test.
+  local dir state fakebin pane out window key pid misses
+  dir=$(make_case endpoint-cycle-gap); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; pane="$dir/pane.txt"
+  window="test:fm-orphan-g1"
+  printf 'building\nesc to interrupt\n' > "$pane"
+  date '+%s' > "$state/.afk"   # away mode: the sibling's signal ends every cycle
+  printf 'window=test:fm-chatty-g2\nkind=ship\n' > "$state/chatty-g2.meta"
+  printf 'working: building\n' > "$state/chatty-g2.status"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/orphan-g1.meta"
+  printf 'working: implementing\n' > "$state/orphan-g1.status"
+  printf '%s' "$(seen_sig "$state/orphan-g1.status")" > "$state/.seen-orphan-g1_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # One miss from the previous cycle: FM_SIGNAL_GRACE lingering plus FM_POLL
+  # sleeping, with a little work time on top.
+  printf '1 %s' "$(( $(date '+%s') - 47 ))" > "$state/.endpoint-miss-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_TMUX_CAPTURE_FAIL_TARGETS="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=2 FM_POLL=15 FM_SIGNAL_GRACE=30 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 450 || fail "the watcher never woke on this cycle"
+  grep -F "check: endpoint $window" "$out" >/dev/null \
+    || fail "a miss one signal-bearing cycle old restarted the run instead of confirming: $(cat "$out")"
+
+  # A genuinely old miss still belongs to no current run.
+  rm -f "$state/.endpoint-surfaced-$key" "$state/.wake-queue"
+  printf '5 %s' "$(( $(date '+%s') - 100000 ))" > "$state/.endpoint-miss-$key"
+  printf 'working: still building\n' >> "$state/chatty-g2.status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_TMUX_CAPTURE_FAIL_TARGETS="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ENDPOINT_MISS_POLLS=99 FM_POLL=15 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch2.out" &
+  pid=$!
+  wait_for_exit "$pid" 300 || fail "the watcher never handled the sibling's signal"
+  misses=$(cut -d' ' -f1 "$state/.endpoint-miss-$key" 2>/dev/null || echo 0)
+  [ "$misses" -ge 1 ] || fail "the fresh miss was not recorded (got '$misses')"
+  [ "$misses" -lt 5 ] \
+    || fail "a run from hours ago was carried forward into this one (got '$misses')"
+  pass "a miss run spans whole watcher cycles while a genuinely old run still restarts"
 }
 
 test_secondmate_endpoint_wake_names_its_home() {
@@ -1733,6 +1785,7 @@ test_nonterminal_stale_not_working_surfaced
 test_unreadable_endpoint_surfaces_once_per_episode
 test_transient_capture_failure_absorbed
 test_stale_miss_does_not_pair_with_a_later_blip
+test_miss_run_survives_a_full_signal_bearing_cycle
 test_secondmate_endpoint_wake_names_its_home
 test_every_lost_endpoint_surfaces_independently
 test_endpoint_wake_not_suppressed_when_the_queue_append_fails

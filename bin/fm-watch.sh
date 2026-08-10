@@ -404,15 +404,21 @@ surface_nonterminal_stale() {  # <window> <hash>
 # the batch.
 ENDPOINT_MISS_POLLS=${FM_ENDPOINT_MISS_POLLS:-2}
 case "$ENDPOINT_MISS_POLLS" in ''|*[!0-9]*) ENDPOINT_MISS_POLLS=2 ;; esac
-# How recent the previous miss must be to still count as the same run. A poll
-# does not necessarily probe every window: a confirmed loss wakes and exits from
-# inside the liveness pass, so every window after it goes unprobed that cycle.
-# A count with no recency check would therefore let one transient
-# blip sit for hours and pair with an unrelated later one to "confirm" a loss for
-# a crew that is alive - so each miss records when it happened, and a gap wider
-# than a few polls starts the run over.
-ENDPOINT_MISS_GAP=${FM_ENDPOINT_MISS_GAP:-$(( POLL * 3 ))}
-case "$ENDPOINT_MISS_GAP" in ''|*[!0-9]*) ENDPOINT_MISS_GAP=$(( POLL * 3 )) ;; esac
+# How recent the previous miss must be to still count as the same run. A count
+# with no recency check would let one transient blip sit for hours and pair with
+# an unrelated later one to "confirm" a loss for a crew that is alive, so each
+# miss records when it happened. The window is measured in whole CYCLES, not
+# polls: two consecutive probes of the same window are a full cycle apart, and a
+# cycle carrying a signal spends SIGNAL_GRACE lingering plus POLL sleeping - with
+# the away-mode daemon's wake handling and watcher restart on top of that. A
+# gap of a few polls would expire mid-run on any signalling fleet, so a dead
+# endpoint would restart its run on every pass and never confirm. A confirmed
+# loss also wakes and exits from inside the liveness pass, leaving every later
+# window unprobed that cycle, which the same several-cycle span absorbs.
+ENDPOINT_MISS_GAP_DEFAULT=$(( (POLL + SIGNAL_GRACE) * 3 ))
+[ "$ENDPOINT_MISS_GAP_DEFAULT" -ge 3 ] || ENDPOINT_MISS_GAP_DEFAULT=3
+ENDPOINT_MISS_GAP=${FM_ENDPOINT_MISS_GAP:-$ENDPOINT_MISS_GAP_DEFAULT}
+case "$ENDPOINT_MISS_GAP" in ''|*[!0-9]*) ENDPOINT_MISS_GAP=$ENDPOINT_MISS_GAP_DEFAULT ;; esac
 [ "$ENDPOINT_MISS_GAP" -ge 3 ] || ENDPOINT_MISS_GAP=3
 
 endpoint_miss_clear() {  # <window>
