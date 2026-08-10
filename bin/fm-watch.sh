@@ -108,7 +108,14 @@ else
   stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }
 fi
 
+# Cadence tunables are sanitized at the point they are read, because both feed
+# arithmetic further down and a stray token in arithmetic under `set -u` aborts
+# the shell - the hazard the stat note above describes, here applied to a
+# mistyped operator override rather than a portability quirk. Killing the
+# supervision backbone at startup over a typo is worse than the documented
+# default, and zero stays a legal value.
 POLL=${FM_POLL:-15}                   # seconds between cycles
+case "$POLL" in ''|*[!0-9]*) POLL=15 ;; esac
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
@@ -116,6 +123,7 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+case "$SIGNAL_GRACE" in ''|*[!0-9]*) SIGNAL_GRACE=30 ;; esac
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
 # grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a

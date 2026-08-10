@@ -350,6 +350,23 @@ test_signal_reconciliation_detail_frames_each_captain_state() {
     *) fail "an ask-user gate was not surfaced as the captain's decision: $out" ;;
   esac
 
+  # And the mixed shape: a crew that appended needs-decision AND has a run parked
+  # at its own gate. The run outranks the log as the state SOURCE, so the line
+  # carries neither captain marker - only the crew's own verb still says whose
+  # decision it is, and the reconciliation retires that status from the catch-all.
+  printf 'working: applying review fixes\nneeds-decision: which auth provider?\n' \
+    > "$state/parked-s6.status"
+  out=$(signal_reconciliation_detail "$state" parked-s6 \
+    'state: parked · source: run-step · parked at review: 2 finding(s) · endpoint: alive' turn-end)
+  case "$out" in
+    *'surface that decision'*) ;;
+    *) fail "a needs-decision under an active run was framed as crew-owed: $out" ;;
+  esac
+  case "$out" in
+    *'which auth provider?'*) ;;
+    *) fail "the retired decision lost the crew's own question: $out" ;;
+  esac
+
   out=$(signal_reconciliation_detail "$state" blocked-s2 \
     'state: blocked · source: status-log · waiting on captain credentials · endpoint: alive' turn-end)
   case "$out" in
@@ -909,6 +926,32 @@ test_stale_miss_does_not_pair_with_a_later_blip() {
   grep -F "check: endpoint $window" "$dir/watch2.out" >/dev/null \
     || fail "the confirmed loss was not surfaced: $(cat "$dir/watch2.out")"
   pass "an old miss cannot pair with a later blip, while back-to-back misses still confirm"
+}
+
+test_malformed_cadence_overrides_do_not_kill_the_watcher() {
+  # FM_POLL and FM_SIGNAL_GRACE feed arithmetic, and a stray token in arithmetic
+  # under `set -u` aborts the shell - so a mistyped override in a home's
+  # environment would kill the supervision backbone at startup rather than
+  # degrade. The documented defaults must take over and the cycle must still do
+  # its work.
+  local dir state fakebin out window pid
+  dir=$(make_case cadence-malformed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-orphan-m1"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/orphan-m1.meta"
+  printf 'working: implementing\n' > "$state/orphan-m1.status"
+  printf '%s' "$(seen_sig "$state/orphan-m1.status")" > "$state/.seen-orphan-m1_status"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=abc FM_SIGNAL_GRACE=15s FM_ENDPOINT_MISS_POLLS=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>"$dir/watch.err" &
+  pid=$!
+  wait_for_exit "$pid" 300 \
+    || fail "a malformed cadence override stopped the watcher from working: $(cat "$dir/watch.err")"
+  grep -F "check: endpoint $window" "$out" >/dev/null \
+    || fail "the watcher did not complete its liveness pass under malformed overrides: $(cat "$out")"
+  pass "malformed cadence overrides fall back to their defaults instead of killing the watcher"
 }
 
 test_miss_run_survives_a_full_signal_bearing_cycle() {
@@ -1786,6 +1829,7 @@ test_unreadable_endpoint_surfaces_once_per_episode
 test_transient_capture_failure_absorbed
 test_stale_miss_does_not_pair_with_a_later_blip
 test_miss_run_survives_a_full_signal_bearing_cycle
+test_malformed_cadence_overrides_do_not_kill_the_watcher
 test_secondmate_endpoint_wake_names_its_home
 test_every_lost_endpoint_surfaces_independently
 test_endpoint_wake_not_suppressed_when_the_queue_append_fails

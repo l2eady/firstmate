@@ -87,6 +87,24 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
+# The verb a crew uses to hand a decision to the captain. Read the same
+# verb-before-the-colon way as status_is_paused, so a question that mentions the
+# word cannot false-match.
+FM_CLASSIFY_DECISION_VERB_DEFAULT='needs-decision'
+
+# 0 if a status line's leading verb hands a decision to the captain. Reported
+# state cannot answer this on its own: an active run outranks the log as the
+# state SOURCE, so a crew that appended needs-decision AND has a run parked at
+# its own gate reports `parked · source: run-step` with no captain marker at all.
+status_is_captain_decision() {  # <status-line>
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=${line%%:*}
+  verb=${verb#"${verb%%[![:space:]]*}"}
+  verb=${verb%"${verb##*[![:space:]]}"}
+  [ "$verb" = "${FM_CLASSIFY_DECISION_VERB:-$FM_CLASSIFY_DECISION_VERB_DEFAULT}" ]
+}
+
 # task id from a recorded window target, falling back to the tmux-shaped
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {
@@ -240,7 +258,7 @@ endpoint_recovery_advice() {  # <kind>
 # that picks the endpoint-lost class, so the prose and the class can never
 # disagree about what this line reports.
 signal_reconciliation_detail() {  # <state> <id> <state-line> <turn-end|status-signal>
-  local sdir=$1 task=$2 line=$3 context=$4 state phrase last
+  local sdir=$1 task=$2 line=$3 context=$4 state phrase last owner
   # "no terminal status" is a claim about the TASK, not about which files the
   # wake happened to name, so it has to be read from the status log. A crew that
   # reported done before the daemon started has no seen-status marker yet, and
@@ -288,19 +306,28 @@ signal_reconciliation_detail() {  # <state> <id> <state-line> <turn-end|status-s
         "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
       return ;;
     parked)
-      # `parked` covers two owners, and the line already carries the evidence.
-      # A needs-decision status log, or a run gate marked ask-user, is the
-      # captain's to answer; a run parked at awaiting_approval/fix_review with no
-      # such marker is owed by the CREW itself, so asking the captain for it
-      # would relay a decision they do not own while the crew idle-waits.
-      case "$line" in
-        *'(ask-user: captain decision)'*|*'source: status-log'*)
-          printf 'task %s is parked on a pending decision %s (%s); last reported: %s; recommended action: surface that decision and answer it so the task can resume' \
-            "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}" ;;
-        *)
-          printf 'task %s is parked at a validation gate it owes the response to %s (%s); last reported: %s; recommended action: steer the crew to answer that gate so its run continues' \
-            "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}" ;;
-      esac
+      # `parked` covers two owners. The crew's own needs-decision verb, a
+      # status-log source, or a run gate marked ask-user makes it the CAPTAIN's
+      # to answer; a run parked at awaiting_approval/fix_review with none of
+      # those is owed by the CREW itself, so asking the captain for it would
+      # relay a decision they do not own while the crew idle-waits. The verb is
+      # tested first and independently of the state line, because an active run
+      # outranks the log as the source and would otherwise hide it.
+      owner=crew
+      if status_is_captain_decision "$last"; then
+        owner=captain
+      else
+        case "$line" in
+          *'(ask-user: captain decision)'*|*'source: status-log'*) owner=captain ;;
+        esac
+      fi
+      if [ "$owner" = captain ]; then
+        printf 'task %s is parked on a pending decision %s (%s); last reported: %s; recommended action: surface that decision and answer it so the task can resume' \
+          "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
+      else
+        printf 'task %s is parked at a validation gate it owes the response to %s (%s); last reported: %s; recommended action: steer the crew to answer that gate so its run continues' \
+          "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
+      fi
       return ;;
     blocked)
       printf 'task %s reports blocked %s (%s); last reported: %s; recommended action: surface the blocker and resolve it, or relay it for a decision, so the task can resume' \

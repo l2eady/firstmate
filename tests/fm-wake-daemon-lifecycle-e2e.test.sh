@@ -154,6 +154,7 @@ test_turn_end_reconciliation_shapes() {
 
   # Endpoint alive but idle, no terminal status: surface the unfinished task for
   # inspection and continuation instead of treating the turn-end as routine.
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
   dir=$(make_supercase turn-end-idle)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; drain_out="$dir/drain.out"
   mkdir -p "$dir/worktree"
@@ -176,8 +177,12 @@ test_turn_end_reconciliation_shapes() {
 
   # A terminal status remains on the existing status-dedup path even when its
   # turn-end marker coalesces into the same wake.
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
   dir=$(make_supercase turn-end-terminal)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; drain_out="$dir/drain.out"
+  FM_CREW_STATE_BIN=$(make_fake_crew_state "$fakebin")
+  export FM_CREW_STATE_BIN
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · ready in branch fm/cv-sw-control-g1 · endpoint: alive'
   printf 'done: ready in branch fm/cv-sw-control-g1\n' > "$state/cv-sw-control-g1.status"
   : > "$state/cv-sw-control-g1.turn-ended"
   run_watcher_once "$state" "$fakebin" "$out" || fail "watcher did not surface the terminal turn-end"
@@ -192,6 +197,7 @@ test_turn_end_reconciliation_shapes() {
 
   # A declared external pause is retained for its bounded long-cadence recheck.
   # It must not be escalated as an orphan merely because the turn ended idle.
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
   dir=$(make_supercase turn-end-paused)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; drain_out="$dir/drain.out"
   mkdir -p "$dir/worktree"
