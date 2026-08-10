@@ -1128,6 +1128,34 @@ test_reconciliation_carries_the_terminal_it_retires() {
   pass "a reconciliation that retires a captain-relevant status carries that status text"
 }
 
+test_reconciliation_frames_a_retired_blocker_as_a_blocker() {
+  # The reconciliation retires the status for the catch-all, so its wording is
+  # the only framing the captain gets. Regression: a blocked crew reconciling
+  # from its own status log must not be described as routine unfinished work.
+  local dir state fakebin crew_state
+  dir=$(make_supercase reconcile-blocked-framing)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  printf 'blocked: waiting on captain credentials\n' > "$state/blk-b1.status"
+  : > "$state/blk-b1.turn-ended"
+
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: blocked · source: status-log · waiting on captain credentials · endpoint: alive' \
+    handle_wake "signal: $state/blk-b1.turn-ended" "$state"
+  grep -F 'task blk-b1 reports blocked' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the blocked crew was not framed as blocked: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  grep -F 'continue the unfinished task' "$state/.subsuper-escalations" >/dev/null \
+    && fail "the blocked crew was framed as routine unfinished work: $(cat "$state/.subsuper-escalations")"
+  grep -F 'waiting on captain credentials' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the digest lost the blocker's own text: $(cat "$state/.subsuper-escalations")"
+
+  # And it is retired exactly once - the catch-all must not re-frame it either.
+  FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+  [ "$(grep -c 'waiting on captain credentials' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "the retired blocker was duplicated by the catch-all: $(cat "$state/.subsuper-escalations")"
+  pass "a reconciliation that retires a blocked status frames it as a blocker, once"
+}
+
 test_housekeeping_append_failure_preserves_detector_state() {
   # escalate_add reports a lost append; every housekeeping caller must withhold
   # the bookkeeping that would retire the event, or the digest loses it forever.
@@ -2318,6 +2346,7 @@ test_classify_signal_reconciliation_dedup
 test_classify_signal_reconciliation_respects_escalated_terminal
 test_reconciliation_before_catch_all_marks_the_terminal_seen
 test_reconciliation_carries_the_terminal_it_retires
+test_reconciliation_frames_a_retired_blocker_as_a_blocker
 test_housekeeping_append_failure_preserves_detector_state
 test_housekeeping_pause_recheck_append_failure_keeps_the_window
 test_failed_escalate_append_withholds_suppression

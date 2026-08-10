@@ -311,6 +311,59 @@ test_signal_reconciliation_detail_precedence() {
   pass "signal_reconciliation_detail ranks endpoint loss over state, and state over source"
 }
 
+# Every state that maps from a captain-relevant verb needs the action that state
+# calls for. These reconciliations also retire the status for the catch-all scan,
+# so a mis-framed line is the ONLY item the captain gets - away mode acts on the
+# digest text, not on operator prose.
+test_signal_reconciliation_detail_frames_each_captain_state() {
+  local dir state out
+  dir=$(make_case reconcile-detail-states); state="$dir/state"
+
+  out=$(signal_reconciliation_detail "$state" parked-s1 \
+    'state: parked · source: status-log · which auth provider? · endpoint: alive' turn-end)
+  case "$out" in
+    *'parked on a pending decision'*) ;;
+    *) fail "a parked crew was not framed as awaiting a decision: $out" ;;
+  esac
+  case "$out" in
+    *'continue the unfinished task'*) fail "parked guidance framed a pending decision as routine work: $out" ;;
+  esac
+
+  out=$(signal_reconciliation_detail "$state" blocked-s2 \
+    'state: blocked · source: status-log · waiting on captain credentials · endpoint: alive' turn-end)
+  case "$out" in
+    *'reports blocked'*) ;;
+    *) fail "a blocked crew was not framed as blocked: $out" ;;
+  esac
+  case "$out" in
+    *'continue the unfinished task'*) fail "blocked guidance framed a blocker as routine work: $out" ;;
+  esac
+  case "$out" in
+    *blocker*) ;;
+    *) fail "blocked guidance did not point at the blocker: $out" ;;
+  esac
+
+  out=$(signal_reconciliation_detail "$state" failed-s3 \
+    'state: failed · source: status-log · rc 2 from the build · endpoint: alive' turn-end)
+  case "$out" in
+    *'reports failed'*) ;;
+    *) fail "a failed crew was not framed as failed: $out" ;;
+  esac
+  case "$out" in
+    *'continue the unfinished task'*) fail "failed guidance framed a failure as routine work: $out" ;;
+  esac
+  case "$out" in
+    *evidence*) ;;
+    *) fail "failed guidance did not ask for the failure evidence: $out" ;;
+  esac
+
+  # A declared external pause is absorbed upstream and must not be reframed as
+  # any of these, so the vocabularies stay distinct.
+  [ "$(crew_absorb_class_from_line 'state: paused · source: status-log · awaiting the vendor reset · endpoint: alive')" = paused ] \
+    || fail "a declared external pause stopped being absorbed as paused"
+  pass "signal_reconciliation_detail gives parked, blocked and failed their own captain-facing action"
+}
+
 # "no terminal status" is a claim about the TASK, so it has to come from the
 # status log rather than from which files the wake happened to name. A crew that
 # reported done before the daemon started has no seen-status marker yet, and
@@ -1589,6 +1642,7 @@ test_status_is_paused_classifier
 test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
 test_signal_reconciliation_detail_precedence
+test_signal_reconciliation_detail_frames_each_captain_state
 test_signal_reconciliation_detail_reads_the_status_log
 test_signal_reconciliation_detail_is_kind_aware
 test_signal_reconciliation_detail_uses_the_passed_state

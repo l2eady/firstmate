@@ -275,15 +275,30 @@ signal_reconciliation_detail() {  # <state> <id> <state-line> <turn-end|status-s
       return
       ;;
   esac
-  # The reported STATE outranks the source it came from. A checks-green crew
-  # monitoring its PR reports done from the status log, and describing that as an
-  # unfinished task to continue would contradict the very line it quotes - and
-  # away mode acts on this text, not on operator prose.
-  if [ "$state" = done ]; then
-    printf 'task %s reports done %s (%s); last reported: %s; recommended action: record completion and continue the existing delivery or safe teardown path' \
-      "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
-    return
-  fi
+  # The reported STATE outranks the source it came from. Every state that maps
+  # from a captain-relevant verb gets the action that state actually calls for:
+  # describing a checks-green, parked, blocked or failed crew as an unfinished
+  # task to continue would contradict the very line it quotes, and away mode acts
+  # on this text rather than on operator prose. A declared external pause never
+  # reaches here - it is absorbed as `paused` - so none of these conflate with it.
+  case "$state" in
+    done)
+      printf 'task %s reports done %s (%s); last reported: %s; recommended action: record completion and continue the existing delivery or safe teardown path' \
+        "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
+      return ;;
+    parked)
+      printf 'task %s is parked on a pending decision %s (%s); last reported: %s; recommended action: surface that decision and answer it so the task can resume' \
+        "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
+      return ;;
+    blocked)
+      printf 'task %s reports blocked %s (%s); last reported: %s; recommended action: surface the blocker and resolve it, or relay it for a decision, so the task can resume' \
+        "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
+      return ;;
+    failed)
+      printf 'task %s reports failed %s (%s); last reported: %s; recommended action: report the failure with its evidence, then recover the task or tear it down safely' \
+        "$task" "$phrase" "${line:-state unreadable}" "${last:-no status}"
+      return ;;
+  esac
   case "$line" in
     *'source: status-log'*|*'no current-state source available'*)
       printf 'task %s endpoint alive but idle %s (%s); last reported: %s; recommended action: inspect and continue the unfinished task' \
