@@ -114,11 +114,31 @@ test_scan_captain_relevant_statuses_classifier() {
   printf 'working: a\n' > "$state/one.status"
   printf 'blocked: no perms\n' > "$state/two.status"
   printf 'done: PR https://x/y/pull/1\n' > "$state/three.status"
+  # Live tasks: fm-spawn writes the meta before the crewmate can append status, and
+  # the scan skips any status log whose meta is gone (see the orphan test below).
+  for t in one two three; do printf 'window=fm-%s\nkind=ship\n' "$t" > "$state/$t.meta"; done
   out=$(scan_captain_relevant_statuses "$state")
   printf '%s' "$out" | grep -F "two.status" >/dev/null || fail "scan missed a blocked: status"
   printf '%s' "$out" | grep -F "three.status" >/dev/null || fail "scan missed a done: status"
   printf '%s' "$out" | grep -F "one.status" >/dev/null && fail "scan surfaced a benign working: status"
   pass "scan_captain_relevant_statuses lists only captain-relevant statuses"
+}
+
+# The orphan guard. A status log whose task is gone (no meta) carries a settled
+# terminal verb, not news; without this the catch-all fleet scan re-reports every
+# lingering done:/blocked: line in state/ as a fresh captain escalation.
+test_scan_skips_orphaned_status_logs() {
+  local dir state out
+  dir=$(make_case classify-orphan); state="$dir/state"
+  printf 'done: shipped, task long torn down\n' > "$state/ghost.status"
+  printf 'done: PR https://x/y/pull/2\n' > "$state/live.status"
+  printf 'window=fm-live\nkind=ship\n' > "$state/live.meta"
+  out=$(scan_captain_relevant_statuses "$state")
+  printf '%s' "$out" | grep -F "live.status" >/dev/null || \
+    fail "orphan guard dropped a live task's captain-relevant status"
+  printf '%s' "$out" | grep -F "ghost.status" >/dev/null && \
+    fail "scan surfaced an orphaned status log (no meta) as captain-relevant news"
+  pass "scan_captain_relevant_statuses skips orphaned status logs, keeps live ones"
 }
 
 test_classifier_primitives() {
@@ -223,6 +243,10 @@ test_signal_crew_provably_working_classifier() {
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE_a='state: working · source: run-step · running'
   export FM_FAKE_CREW_STATE_b='state: done · source: run-step · run passed'
+  # Both are LIVE tasks: fm-spawn writes the meta before the crew can signal, and
+  # its absence is what marks a signal file as an orphan below.
+  printf 'window=fm-a\nkind=ship\n' > "$state/a.meta"
+  printf 'window=fm-b\nkind=ship\n' > "$state/b.meta"
   signal_crew_provably_working "$state/a.status" "$state/a.turn-ended" \
     || fail "a single provably-working crew (status+turn-end) was not benign"
   ! signal_crew_provably_working "$state/a.status" "$state/b.turn-ended" \
@@ -233,8 +257,20 @@ test_signal_crew_provably_working_classifier() {
     || fail "a non-signal file resolved to a benign verdict"
   ! signal_crew_provably_working \
     || fail "an empty signal file list was treated as benign"
+  # Orphans absorb: a torn-down task's leftover turn-end marker carries no verb, so
+  # without this it reaches the crew-state check, reads `unknown`, and surfaces a
+  # wake for a crew that no longer exists.
+  [ "$(crew_absorb_class ghost "$state")" = orphan ] || \
+    fail "a signal file with no meta was not classed orphan"
+  signal_crew_provably_working "$state/ghost.turn-ended" \
+    || fail "an orphaned turn-end marker was surfaced instead of absorbed"
+  signal_crew_provably_working "$state/ghost.status" \
+    || fail "an orphaned status signal was surfaced instead of absorbed"
+  # An orphan must not launder a live stopped crew in the same coalesced batch.
+  ! signal_crew_provably_working "$state/ghost.turn-ended" "$state/b.turn-ended" \
+    || fail "an orphan in the batch masked a live stopped crew"
   unset FM_FAKE_CREW_STATE_a FM_FAKE_CREW_STATE_b
-  pass "signal_crew_provably_working: benign only when every referenced crew is provably working"
+  pass "signal_crew_provably_working: benign only when every referenced crew is provably working or gone"
 }
 
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
@@ -243,6 +279,7 @@ test_provably_working_signal_absorbed() {
   local dir state fakebin out status_file pid
   dir=$(make_case provably-working-signal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   status_file="$state/task.status"
+  printf 'window=fm-task\nkind=ship\n' > "$state/task.meta"
   printf 'working: compiling step 2\n' > "$status_file"
   # The crew's pipeline is in an actively-running step: positive evidence it is
   # still working, so a no-verb working: signal is absorbed (the original low-churn
@@ -265,6 +302,7 @@ test_turn_ended_provably_working_absorbed() {
   local dir state fakebin out pid
   dir=$(make_case turn-ended-working); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   : > "$state/task.turn-ended"
+  printf 'window=fm-task\nkind=ship\n' > "$state/task.meta"
   # A busy pane is the second form of positive evidence (covers a queued
   # continuation right after the turn-end).
   export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
@@ -289,6 +327,8 @@ test_turn_ended_not_working_surfaced() {
   dir=$(make_case turn-ended-stopped); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   : > "$state/task.turn-ended"
+  # A LIVE task (meta present) that stopped: the orphan absorb must not reach it.
+  printf 'window=fm-task\nkind=ship\n' > "$state/task.meta"
   # No running pipeline, no busy pane: the crew has stopped (e.g. it finished via
   # an interactive menu and wrote no done: status). Default unknown verdict.
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
@@ -306,6 +346,7 @@ test_working_note_not_working_surfaced() {
   dir=$(make_case working-note-stopped); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   status_file="$state/task.status"
+  printf 'window=fm-task\nkind=ship\n' > "$state/task.meta"
   printf 'working: compiling step 2\n' > "$status_file"
   # A non-no-mistakes crew (no run) whose pane went idle: fm-crew-state falls back
   # to the stale working: status-log line. That is NOT positive evidence, so the
@@ -328,6 +369,7 @@ test_actionable_signal_surfaced() {
   dir=$(make_case actionable-signal); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   status_file="$state/task.status"
+  printf 'window=fm-task\nkind=ship\n' > "$state/task.meta"
   printf 'working: setup\nneeds-decision: pick A or B\n' > "$status_file"
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
@@ -934,6 +976,7 @@ exit 127
 SH
   chmod +x "$fakebin/wc"
   status_file="$state/task.status"
+  printf 'window=fm-task\nkind=ship\n' > "$state/task.meta"
   printf 'working: compiling step 2\n' > "$status_file"
   # Provably working so the no-verb signal is absorbed (which is what writes the
   # triage log line under test).
@@ -985,6 +1028,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   # .hb-surfaced-* marker). This stands in for a per-wake-path miss; the heartbeat
   # fleet-scan backstop must catch it and wake firstmate.
   printf 'done: PR https://example.test/pr/5\n' > "$state/miss.status"
+  printf 'window=fm-miss\nkind=ship\n' > "$state/miss.meta"
   sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
@@ -1004,6 +1048,7 @@ test_beacon_stays_fresh_while_absorbing() {
   local dir state fakebin out status_file pid m1 m2 now
   dir=$(make_case beacon-fresh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   status_file="$state/task.status"
+  printf 'window=fm-task\nkind=ship\n' > "$state/task.meta"
   printf 'working: a\n' > "$status_file"
   # Provably working so the working: notes are absorbed (the path that must keep the
   # beacon fresh).
@@ -1035,6 +1080,7 @@ test_afk_present_reverts_watcher_to_one_shot() {
   dir=$(make_case afk-coherence); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   status_file="$state/task.status"
+  printf 'window=fm-task\nkind=ship\n' > "$state/task.meta"
   printf 'working: routine note\n' > "$status_file"
   date '+%s' > "$state/.afk"   # away mode: the supervise-daemon owns triage
   # Set a PROVABLY-WORKING verdict: if afk failed to bypass the provably-working
@@ -1090,6 +1136,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
+test_scan_skips_orphaned_status_logs
 test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier

@@ -132,17 +132,28 @@ signal_reason_is_actionable() {  # <file> ...
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
+#   orphan  - no state/<id>.meta: the task is gone, so the signal is leftover
+#             state from a finished task and there is no crew to wake for;
+#   none    - none of those, so the wake must surface (a stopped/finished/parked/
+#             failed/unknown crew, or an unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
-  local id=$1 line state src
+crew_absorb_class() {  # <id> [<state>]
+  local id=$1 state_dir=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} line state src
   [ -n "$id" ] || { printf 'none'; return; }
+  # A task with no state/<id>.meta is GONE, not idle. Asking fm-crew-state.sh
+  # about it yields `unknown`, which reads as "not provably working" and would
+  # surface a wake for a crew that no longer exists - the .turn-ended twin of the
+  # orphaned-.status problem, since a bare turn-end marker carries no verb and so
+  # is decided entirely here. Absorb it: there is nothing left to wake for.
+  if [ -n "$state_dir" ] && [ -d "$state_dir" ] && [ ! -e "$state_dir/$id.meta" ]; then
+    printf 'orphan'
+    return
+  fi
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
@@ -172,13 +183,14 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
-# 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
-# working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
-# same space-separated file list as signal_reason_is_actionable. Files are mapped to
-# task ids by stripping the .status / .turn-ended suffix; a no-verb wake with nothing
-# provably working must surface, so an empty/unresolvable list returns 1.
+# 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is either
+# provably working or an orphan whose task is gone; 1 (actionable/surface) if any is
+# neither, or no task can be resolved. Pass the same space-separated file list as
+# signal_reason_is_actionable. Files are mapped to task ids by stripping the
+# .status / .turn-ended suffix; a no-verb wake with nothing absorbable must surface,
+# so an empty/unresolvable list returns 1.
 signal_crew_provably_working() {  # <file> ...
-  local f base task seen=""
+  local f base task seen="" dir
   for f in "$@"; do
     base=${f##*/}
     case "$base" in
@@ -189,7 +201,13 @@ signal_crew_provably_working() {  # <file> ...
     [ -n "$task" ] || continue
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
-    crew_is_provably_working "$task" || return 1
+    # Resolve the state dir from the signal file itself, so an absolute path in a
+    # wake reason is classified against the home that actually owns it.
+    dir=${f%/*}
+    case "$(crew_absorb_class "$task" "$dir")" in
+      working|orphan) ;;
+      *) return 1 ;;
+    esac
   done
   [ -n "$seen" ] || return 1
   return 0
@@ -206,17 +224,37 @@ stale_is_terminal() {  # <window> <state>
 }
 
 # Print "<file>\t<task>\t<last-line>" for every state/*.status whose last line is
-# captain-relevant. This is the cheap fleet-scan both supervisors run as a
-# catch-all backstop for a captain-relevant status the per-wake path might miss.
+# captain-relevant AND whose task is still live. This is the cheap fleet-scan both
+# supervisors run as a catch-all backstop for a captain-relevant status the
+# per-wake path might miss.
 # No dedup is applied here: each consumer dedupes against its own seen-state (the
 # daemon against .subsuper-seen-status-*, the watcher against .seen-* signatures).
+#
+# Liveness is the presence of the task's state/<id>.meta. A status log with no
+# meta is an ORPHAN: its task is gone, so its terminal `done:`/`blocked:` line is
+# settled history, not news, and re-reporting it wastes a captain escalation on
+# work that already finished. bin/fm-teardown.sh archives the log out of state/ on
+# a clean teardown, so this guard is the backstop for logs orphaned another way.
+#
+# THIS GUARD TREATS A SYMPTOM. What actually produces orphans is NOT identified;
+# do not read it as closed. A teardown that failed partway is ruled out - teardown
+# removes .status and .meta in one rm, and every earlier abort leaves the meta in
+# place, so a partial teardown yields meta+status, never status alone. What has
+# been observed is agents outside firstmate's meta bookkeeping: a live `fm-<id>`
+# pane with no state files at all, whose next status append creates an orphan by
+# construction. Whether that comes from killed panes, crashed lanes, or writes
+# outside the brief protocol is unknown, so this guard must not be the last word.
+#
+# There is no live-task race to lose: bin/fm-spawn.sh writes the meta before the
+# agent can append its first status line, so meta always precedes status.
 scan_captain_relevant_statuses() {  # <state>
   local state=$1 f last task
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    [ -e "$state/$task.meta" ] || continue
     last=$(last_status_line "$f")
     status_is_captain_relevant "$last" || continue
-    task=$(basename "$f"); task="${task%.status}"
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
   done
   return 0
