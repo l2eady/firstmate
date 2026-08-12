@@ -704,6 +704,14 @@ endpoint_mark_surfaced() {  # <state> <window>
   : > "$1/.endpoint-surfaced-$(_stale_key "$2")"
 }
 
+# End the episode from this side. Demonstrated liveness is the same evidence the
+# watcher's endpoint_miss_clear acts on, so it has to retire the shared record
+# too: leaving it behind would let the NEXT genuine loss of the same endpoint be
+# swallowed as an already-surfaced episode.
+endpoint_clear_surfaced() {  # <state> <window>
+  rm -f "$1/.endpoint-surfaced-$(_stale_key "$2")"
+}
+
 # Resolve the recorded endpoint for a task id, or nothing when it has none.
 task_endpoint() {  # <state> <task>
   window_for_task "$(_stale_key "$2")" "$1" 2>/dev/null || true
@@ -782,7 +790,10 @@ reconcile_task_dedupe_hook() {  # <task> <class> <detail>
       # blip cannot land on top of an older one and reach the threshold.
       reconcile_seen_clear "$state" "$task"
       win=$(task_endpoint "$state" "$task")
-      [ -n "$win" ] && endpoint_miss_reset "$state" "$win"
+      if [ -n "$win" ]; then
+        endpoint_miss_reset "$state" "$win"
+        endpoint_clear_surfaced "$state" "$win"
+      fi
       return ;;
   esac
   reconcile_status_already_escalated "$state" "$task" && return

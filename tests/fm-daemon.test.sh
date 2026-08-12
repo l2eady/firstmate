@@ -926,6 +926,10 @@ test_classify_signal_mixed_wake_reconciles_the_other_task() {
   dir=$(make_supercase signal-mixed-wake)
   state="$dir/state"; fakebin="$dir/fakebin"
   crew_state=$(make_fake_crew_state "$fakebin")
+  # Both are IN-FLIGHT tasks: fm-spawn records the meta before a crew can signal,
+  # and a signal whose meta is gone is settled history the reconciler absorbs.
+  fm_write_meta "$state/mixed-verb-m1.meta" "window=sess:fm-mixed-verb-m1" "kind=ship"
+  fm_write_meta "$state/mixed-orphan-m2.meta" "window=sess:fm-mixed-orphan-m2" "kind=ship"
   printf 'done: PR https://x/y/pull/11\n' > "$state/mixed-verb-m1.status"
   : > "$state/mixed-orphan-m2.turn-ended"
 
@@ -960,6 +964,8 @@ test_classify_signal_mixed_wake_drops_already_escalated_status() {
   dir=$(make_supercase signal-mixed-seen)
   state="$dir/state"; fakebin="$dir/fakebin"
   crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/seen-verb-s1.meta" "window=sess:fm-seen-verb-s1" "kind=ship"
+  fm_write_meta "$state/seen-orphan-s2.meta" "window=sess:fm-seen-orphan-s2" "kind=ship"
   printf 'done: PR https://x/y/pull/13 checks green\n' > "$state/seen-verb-s1.status"
   : > "$state/seen-orphan-s2.turn-ended"
   # The catch-all scan already escalated the status and recorded its marker.
@@ -987,6 +993,7 @@ test_classify_signal_reconciliation_dedup() {
   dir=$(make_supercase signal-reconcile-dedup)
   state="$dir/state"; fakebin="$dir/fakebin"
   crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/recon-dup-r7.meta" "window=sess:fm-recon-dup-r7" "kind=ship"
   : > "$state/recon-dup-r7.turn-ended"
   key=$(printf '%s' "recon-dup-r7" | tr ':/.' '___')
 
@@ -1038,6 +1045,7 @@ test_classify_signal_reconciliation_respects_escalated_terminal() {
   crew_state=$(make_fake_crew_state "$fakebin")
   key=$(printf '%s' "term-t3" | tr ':/.' '___')
   printf 'done: PR https://x/y/pull/12 checks green\n' > "$state/term-t3.status"
+  fm_write_meta "$state/term-t3.meta" "window=sess:fm-term-t3" "kind=ship"
   : > "$state/term-t3.turn-ended"
 
   # Wake 1: the status path escalates and records the seen marker.
@@ -1074,6 +1082,7 @@ test_reconciliation_before_catch_all_marks_the_terminal_seen() {
   dir=$(make_supercase reconcile-before-catchall)
   state="$dir/state"; fakebin="$dir/fakebin"
   crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/first-f1.meta" "window=sess:fm-first-f1" "kind=ship"
   printf 'done: PR https://x/y/pull/41 checks green\n' > "$state/first-f1.status"
   : > "$state/first-f1.turn-ended"
 
@@ -1100,6 +1109,7 @@ test_reconciliation_carries_the_terminal_it_retires() {
   dir=$(make_supercase reconcile-carries-terminal)
   state="$dir/state"; fakebin="$dir/fakebin"
   crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/carry-c1.meta" "window=sess:fm-carry-c1" "kind=ship"
   printf 'done: PR https://github.com/o/r/pull/41 checks green\n' > "$state/carry-c1.status"
   : > "$state/carry-c1.turn-ended"
 
@@ -1117,6 +1127,7 @@ test_reconciliation_carries_the_terminal_it_retires() {
     || fail "the retired completion was duplicated by the catch-all: $(cat "$state/.subsuper-escalations")"
 
   # Same shape for a decision: the question itself must survive.
+  fm_write_meta "$state/carry-c2.meta" "window=sess:fm-carry-c2" "kind=ship"
   printf 'needs-decision: which auth provider?\n' > "$state/carry-c2.status"
   : > "$state/carry-c2.turn-ended"
   : > "$state/.subsuper-escalations"
@@ -1136,6 +1147,7 @@ test_reconciliation_frames_a_retired_blocker_as_a_blocker() {
   dir=$(make_supercase reconcile-blocked-framing)
   state="$dir/state"; fakebin="$dir/fakebin"
   crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/blk-b1.meta" "window=sess:fm-blk-b1" "kind=ship"
   printf 'blocked: waiting on captain credentials\n' > "$state/blk-b1.status"
   : > "$state/blk-b1.turn-ended"
 
@@ -1168,6 +1180,7 @@ test_reconciliation_suppression_survives_a_tabbed_status_line() {
   crew_state=$(make_fake_crew_state "$fakebin")
   tabbed=$(printf 'blocked: needs\tcolumn\taccess granted')
   fakeline=$(printf 'state: blocked · source: status-log · needs\tcolumn\taccess · endpoint: alive')
+  fm_write_meta "$state/tab-t1.meta" "window=sess:fm-tab-t1" "kind=ship"
   printf '%s\n' "$tabbed" > "$state/tab-t1.status"
   : > "$state/tab-t1.turn-ended"
 
@@ -1317,6 +1330,7 @@ test_classify_signal_skips_torn_down_task_files() {
   assert_not_contains "$out" "recommended recovery:" "a torn-down task produced a recovery recommendation"
 
   # A file that still exists is still reconciled.
+  fm_write_meta "$state/live-d5.meta" "window=sess:fm-live-d5" "kind=ship"
   : > "$state/live-d5.turn-ended"
   out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
     FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-live-d5 · endpoint: gone' \

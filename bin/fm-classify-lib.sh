@@ -173,8 +173,9 @@ task_is_orphan() {  # <state> <id>
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
-#   orphan  - no state/<id>.meta: the task is gone, so the signal is leftover
-#             state from a finished task and there is no crew to wake for;
+#   orphan  - crew_absorb_class only, decided before the read: no state/<id>.meta,
+#             so the task is gone and the signal is leftover state from a finished
+#             task with no crew to wake for;
 #   none    - none of those, so the wake must surface (a stopped/finished/parked/
 #             failed/unknown crew, or an unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
