@@ -563,6 +563,8 @@ test_heartbeat_scan_dedup() {
   dir=$(make_supercase scan-dedup)
   state="$dir/state"
   printf 'done: ready\n' > "$state/dup-t6.status"
+  # A live task always has a meta; the scan skips status logs without one.
+  printf 'window=fm-dup-t6\nkind=ship\n' > "$state/dup-t6.meta"
   rm -f "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ -s "$state/.subsuper-escalations" ] || fail "catch-all scan did not escalate a terminal"
@@ -571,6 +573,21 @@ test_heartbeat_scan_dedup() {
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ -s "$state/.subsuper-escalations" ] && fail "catch-all scan re-escalated the same terminal (dedup failed)"
   pass "catch-all scan escalates a missed terminal once, not twice"
+}
+
+# An orphaned status log - one whose task is gone, so its meta is gone - is
+# settled history, not news. Before this guard the away-mode catch-all scan
+# re-reported every lingering terminal verb in state/ as a fresh escalation.
+test_heartbeat_scan_skips_orphaned_status() {
+  local dir state
+  dir=$(make_supercase scan-orphan)
+  state="$dir/state"
+  printf 'done: shipped and torn down long ago\n' > "$state/ghost-t7.status"
+  rm -f "$state/ghost-t7.meta" "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] && \
+    fail "catch-all scan escalated an orphaned status log (no meta) as fresh news"
+  pass "catch-all scan ignores an orphaned status log whose task is gone"
 }
 
 test_handle_wake_routes_self_and_escalate() {
@@ -1679,6 +1696,7 @@ test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
+test_heartbeat_scan_skips_orphaned_status
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout

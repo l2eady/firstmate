@@ -1415,6 +1415,10 @@ kind=ship
 mode=no-mistakes
 yolo=off
 EOF
+  # The child's wake history: its own home is about to be removed, so this is the
+  # record of what --force discarded and it must survive in the parent's archive.
+  printf 'working: building\nblocked: needs a decision that never came\n' \
+    > "$subhome/state/child.status"
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-teardown-fake")
   log="$TMP_ROOT/force-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
@@ -1430,7 +1434,14 @@ EOF
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "force teardown did not remove secondmate registry route"
   grep -F 'kill-window -t firstmate:fm-child' "$log" >/dev/null || fail "force teardown did not kill child window"
   grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window"
-  pass "secondmate force teardown discards child work"
+  # The discarded child's log lands in the surviving parent's archive, qualified by
+  # the retired secondmate's id so two homes' children cannot collide.
+  [ -f "$home/data/status-archive/domain--child.status" ] || \
+    fail "force teardown discarded the child's status log instead of archiving it"
+  grep -F 'blocked: needs a decision that never came' \
+    "$home/data/status-archive/domain--child.status" >/dev/null || \
+    fail "archived child log lost its content"
+  pass "secondmate force teardown discards child work and archives the child status log"
 }
 
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {

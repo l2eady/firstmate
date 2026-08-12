@@ -49,6 +49,15 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# Also covers status-log archiving: state/<id>.status must leave the scanned state
+# dir (an orphaned log feeds the supervisors' catch-all scan a dead task's terminal
+# verb as fresh news) while surviving as the record of the task's wake history.
+#   (z1) normal teardown             -> log moved to the archive, content intact
+#   (z2) --force teardown            -> archived too (discard path needs the record)
+#   (z3) archive dir unwritable      -> ABORT loudly, log left intact in state/
+#   (z4) archived log already exists -> lands beside it, never clobbers
+#   (z5) watcher/daemon markers      -> purged with the task they belong to
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -493,8 +502,20 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_STATUS_ARCHIVE_OVERRIDE="${FM_STATUS_ARCHIVE_OVERRIDE:-$case_dir/data/status-archive}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+# Give the task a status log with the shape a real one has: working lines
+# followed by a terminal captain-relevant verb. Args: case_dir
+write_status_log() {
+  local case_dir=$1
+  printf '%s\n' \
+    "working: started on the fix" \
+    "done: PR https://github.com/o/r/pull/7 checks green" \
+    > "$case_dir/state/task-x1.status"
 }
 
 test_local_only_fork_remote_allows() {
@@ -1242,6 +1263,147 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+# --- status-log archiving (orphan-rescan fix) -------------------------------
+#
+# state/<id>.status is the only per-task state file that accumulates history, and
+# leaving it in state/ after teardown feeds the supervisors' catch-all fleet scan a
+# dead task's terminal verb as fresh news. Teardown moves it to the archive: it must
+# leave state/ (the scanned location) AND survive (the wake history is the record).
+
+test_status_log_is_archived_not_left_behind() {
+  local case_dir rc
+  case_dir=$(make_case archive-status)
+  write_meta "$case_dir" local-only ship
+  write_status_log "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "archive-status: teardown should succeed on landed work"
+  # The bug: the log stays in the scanned state dir and keeps re-escalating.
+  [ ! -e "$case_dir/state/task-x1.status" ] || \
+    fail "archive-status: status log left behind in state/ - the catch-all scan will re-read it"
+  # The other half: it must not simply be deleted; the wake history is the record.
+  [ -f "$case_dir/data/status-archive/task-x1.status" ] || \
+    fail "archive-status: status log is gone entirely, not archived"
+  grep -q "done: PR https://github.com/o/r/pull/7 checks green" \
+    "$case_dir/data/status-archive/task-x1.status" || \
+    fail "archive-status: archived log lost its content"
+  grep -q "working: started on the fix" "$case_dir/data/status-archive/task-x1.status" || \
+    fail "archive-status: archived log lost earlier wake-event lines"
+  grep -q "archived status log" "$case_dir/stdout" || \
+    fail "archive-status: teardown did not report where the log went"
+  pass "teardown archives the status log out of state/ and keeps it readable"
+}
+
+test_force_teardown_archives_status_log() {
+  local case_dir rc
+  case_dir=$(make_case archive-force)
+  write_meta "$case_dir" local-only ship
+  write_status_log "$case_dir"
+  wt_commit "$case_dir" "work being discarded"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "archive-force: --force teardown should succeed"
+  [ ! -e "$case_dir/state/task-x1.status" ] || \
+    fail "archive-force: status log left behind in state/ under --force"
+  # --force is the discard path, so the record of what was discarded matters most.
+  [ -f "$case_dir/data/status-archive/task-x1.status" ] || \
+    fail "archive-force: --force dropped the status log instead of archiving it"
+  pass "--force teardown archives the status log too (discarded work still leaves a record)"
+}
+
+test_archive_failure_aborts_loudly_and_keeps_log() {
+  local case_dir rc
+  case_dir=$(make_case archive-fail)
+  write_meta "$case_dir" local-only ship
+  write_status_log "$case_dir"
+  # A regular file where the archive DIRECTORY must be created: mkdir -p fails,
+  # portably and without depending on permissions or the test user.
+  mkdir -p "$case_dir/data"
+  : > "$case_dir/data/blocked"
+
+  set +e
+  FM_STATUS_ARCHIVE_OVERRIDE="$case_dir/data/blocked/status-archive" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "archive-fail: teardown exited 0 despite being unable to archive the log"
+  grep -q "could not archive status log" "$case_dir/stderr" || \
+    fail "archive-fail: teardown did not say loudly that archiving failed"
+  # Losing the log is the failure mode this guards against.
+  [ -f "$case_dir/state/task-x1.status" ] || \
+    fail "archive-fail: status log was dropped by a teardown that could not archive it"
+  grep -q "done: PR https://github.com/o/r/pull/7 checks green" "$case_dir/state/task-x1.status" || \
+    fail "archive-fail: status log left in place but truncated"
+  pass "a teardown that cannot archive aborts loudly and leaves the log intact"
+}
+
+test_archive_never_clobbers_an_existing_log() {
+  local case_dir rc
+  case_dir=$(make_case archive-collide)
+  write_meta "$case_dir" local-only ship
+  write_status_log "$case_dir"
+  # An earlier task with the same id already archived its log.
+  mkdir -p "$case_dir/data/status-archive"
+  printf 'done: the earlier run\n' > "$case_dir/data/status-archive/task-x1.status"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "archive-collide: teardown should succeed"
+  grep -q "done: the earlier run" "$case_dir/data/status-archive/task-x1.status" || \
+    fail "archive-collide: the pre-existing archived log was overwritten"
+  [ -f "$case_dir/data/status-archive/task-x1.2.status" ] || \
+    fail "archive-collide: the new log did not land beside the existing one"
+  grep -q "checks green" "$case_dir/data/status-archive/task-x1.2.status" || \
+    fail "archive-collide: the newly archived log has the wrong content"
+  pass "archiving never clobbers an existing archived log"
+}
+
+test_teardown_purges_supervision_markers() {
+  local case_dir rc
+  case_dir=$(make_case purge-markers)
+  write_meta "$case_dir" local-only ship
+  write_status_log "$case_dir"
+  # Bookkeeping a live task accumulates: the watcher's per-file signature and
+  # surfaced marker, the daemon's escalation dedup, and window-keyed wedge state.
+  # window= is fm-task-x1 (write_meta), so the window key is the same string.
+  : > "$case_dir/state/.seen-task-x1_status"
+  : > "$case_dir/state/.hb-surfaced-task-x1"
+  : > "$case_dir/state/.subsuper-seen-status-task-x1"
+  : > "$case_dir/state/.stale-fm-task-x1"
+  : > "$case_dir/state/.wedge-escalations-fm-task-x1"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "purge-markers: teardown should succeed"
+  local leftover
+  for leftover in .seen-task-x1_status .hb-surfaced-task-x1 .subsuper-seen-status-task-x1 \
+    .stale-fm-task-x1 .wedge-escalations-fm-task-x1; do
+    [ ! -e "$case_dir/state/$leftover" ] || \
+      fail "purge-markers: $leftover survived teardown"
+  done
+  pass "teardown purges the watcher and daemon markers keyed to the dead task"
+}
+
+test_status_log_is_archived_not_left_behind
+test_force_teardown_archives_status_log
+test_archive_failure_aborts_loudly_and_keeps_log
+test_archive_never_clobbers_an_existing_log
+test_teardown_purges_supervision_markers
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present

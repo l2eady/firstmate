@@ -43,6 +43,24 @@
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #
+# Status-log archiving: state/<id>.status is the ONLY per-task state file that
+# accumulates history (crewmates append one wake-event line per phase change);
+# every other per-task file teardown clears is a marker, a generated hook, or
+# regenerable metadata with nothing to preserve. So teardown MOVES the status log
+# to data/status-archive/<id>.status instead of deleting it, on every path
+# including --force, where the record of discarded work matters most. An existing
+# archived log is never clobbered; a reused id lands beside it as <id>.<n>.status.
+# If the archive cannot be written, teardown ABORTS loudly with the log still in
+# place rather than proceeding into the state rm and dropping it.
+# A retired secondmate's children archive into the surviving parent's archive as
+# <secondmate-id>--<child-id>.status, because their own home is being removed.
+# FM_STATUS_ARCHIVE_OVERRIDE relocates the archive (tests).
+# Moving the log out of state/ also stops the supervisors' catch-all fleet scan
+# (bin/fm-classify-lib.sh's scan_captain_relevant_statuses) from re-reading a dead
+# task's terminal `done:`/`blocked:` line as fresh news.
+# Teardown additionally purges the watcher and away-mode daemon bookkeeping
+# markers keyed to the dead task and its window; see purge_supervision_markers.
+#
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
 # non-linked worktree, .git/index.lock) that makes `treehouse return --force` fail
@@ -81,6 +99,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDMATE_REG="$DATA/secondmates.md"
+# Durable home for finished tasks' status logs; see archive_task_status.
+STATUS_ARCHIVE="${FM_STATUS_ARCHIVE_OVERRIDE:-$DATA/status-archive}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
@@ -169,6 +189,54 @@ remove_grok_turnend_auth() {
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
   rm -f "$hooks_dir/$token"
+}
+
+# Move a finished task's status log out of the scanned state dir and into the
+# durable archive, preserving it. Returns non-zero WITHOUT touching the log if
+# the archive cannot be written, so the caller can abort loudly rather than
+# proceed into the state rm and drop the only record of the task's wake history.
+# Never clobbers an existing archived log: a reused id or a retried teardown
+# lands beside it as <id>.<n>.status instead of overwriting. <dest-id> defaults
+# to <id>; a retired secondmate's children pass a home-qualified name so their
+# logs stay distinguishable in the surviving parent's archive.
+archive_task_status() {  # <state-dir> <id> <archive-dir> [<dest-id>]
+  local state_dir=$1 id=$2 archive_dir=$3 dest_id=${4:-$2} src dest n
+  src="$state_dir/$id.status"
+  [ -e "$src" ] || return 0
+  mkdir -p "$archive_dir" || return 1
+  dest="$archive_dir/$dest_id.status"
+  n=2
+  while [ -e "$dest" ]; do
+    dest="$archive_dir/$dest_id.$n.status"
+    n=$((n + 1))
+  done
+  mv "$src" "$dest" || return 1
+  printf '%s' "$dest"
+}
+
+# Drop the supervision bookkeeping a finished task leaves behind. These are the
+# watcher's per-file/per-window dedup and wedge-tracking markers and the
+# away-mode daemon's escalation-dedup markers; both are keyed by the task id or
+# its window target, and neither carries wake history worth archiving. Left in
+# place they accumulate one set per torn-down task forever, and a later task
+# reusing the id or window target would inherit stale suppression state.
+purge_supervision_markers() {  # <state-dir> <id> <window-target>
+  local state_dir=$1 id=$2 win=${3:-} id_key win_key
+  id_key=$(printf '%s' "$id" | tr ':/.' '___')
+  rm -f \
+    "$state_dir/.seen-$(printf '%s' "$id.status" | tr '.' '_')" \
+    "$state_dir/.seen-$(printf '%s' "$id.turn-ended" | tr '.' '_')" \
+    "$state_dir/.hb-surfaced-$id_key" \
+    "$state_dir/.subsuper-seen-status-$id_key" \
+    "$state_dir/.subsuper-stale-$id_key" \
+    "$state_dir/.subsuper-paused-$id_key"
+  [ -n "$win" ] || return 0
+  win_key=$(printf '%s' "$win" | tr ':/.' '___')
+  rm -f \
+    "$state_dir/.hash-$win_key" "$state_dir/.count-$win_key" \
+    "$state_dir/.stale-$win_key" "$state_dir/.stale-since-$win_key" \
+    "$state_dir/.paused-$win_key" "$state_dir/.paused-rechecked-$win_key" \
+    "$state_dir/.paused-resurfaced-$win_key" "$state_dir/.wedge-escalations-$win_key"
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
@@ -854,7 +922,7 @@ validate_firstmate_home_children_removal() {
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_archived
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -916,7 +984,17 @@ cleanup_firstmate_home_children() {
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+    # The child's own home is about to be removed, so its status log is archived
+    # into the SURVIVING parent's archive under a home-qualified name. This is the
+    # --force discard path, where the record of what was discarded matters most.
+    if ! child_archived=$(archive_task_status "$sub_state" "$child_id" "$STATUS_ARCHIVE" "$ID--$child_id"); then
+      echo "error: could not archive status log $sub_state/$child_id.status to $STATUS_ARCHIVE; teardown aborted" >&2
+      echo "That log is the only record of the discarded child task's wake history; fix the archive path and re-run." >&2
+      return 1
+    fi
+    [ -z "$child_archived" ] || echo "teardown: archived child status log to $child_archived"
+    rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+    purge_supervision_markers "$sub_state" "$child_id" "$child_t"
   done
 }
 
@@ -1037,7 +1115,14 @@ remove_grok_turnend_auth "$STATE" "$ID"
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+if ! ARCHIVED=$(archive_task_status "$STATE" "$ID" "$STATUS_ARCHIVE"); then
+  echo "error: could not archive status log $STATE/$ID.status to $STATUS_ARCHIVE; teardown aborted" >&2
+  echo "The log is the only record of this task's wake history and is still in place; fix the archive path and re-run." >&2
+  exit 1
+fi
+[ -z "$ARCHIVED" ] || echo "teardown: archived status log to $ARCHIVED"
+rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+purge_supervision_markers "$STATE" "$ID" "$T"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
