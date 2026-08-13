@@ -337,7 +337,10 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop.
+If firstmate's current-state read reports \`no CI checks available\`, append \`done: PR {url} no CI checks available\` and stop.
+Never rewrite a no-CI result as checks green, and keep working when firstmate reports a failed, pending, unavailable, or ambiguous CI result.
+You are finished only after one of those two distinct terminal outcomes is supported by the current-state read.
 EOF
 )
     ;;

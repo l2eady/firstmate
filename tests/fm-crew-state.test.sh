@@ -546,6 +546,21 @@ test_ci_monitoring_no_checks_rechecks_before_done() {
   pass "no-CI conclusion gets a second GitHub check after the grace path"
 }
 
+test_ci_monitoring_github_green_stays_distinct_from_no_ci() {
+  reset_fakes
+  local d; d=$(new_case ci-github-green)
+  make_repo_on_branch "$d/wt" fm/feat-ci-github-green
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ci-github-green.meta" "window=fm:fm-feat-ci-github-green" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci-github-green)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  FM_FAKE_GH_CHECKS_OUTPUT='checks: "2 passed, 0 failed"'
+  local out; out=$(run_crew_state "$d" feat-ci-github-green)
+  assert_contains "$out" "checks green" "GitHub green result is reported as green"
+  assert_not_contains "$out" "no CI checks available" "GitHub green result is not no-CI"
+  pass "GitHub green remains distinct from an absent CI configuration"
+}
+
 test_ci_monitoring_no_checks_transient_error_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-nochecks-transient)
@@ -1158,6 +1173,7 @@ test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
 test_ci_monitoring_no_checks_rechecks_before_done
+test_ci_monitoring_github_green_stays_distinct_from_no_ci
 test_ci_monitoring_no_checks_transient_error_stays_working
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working

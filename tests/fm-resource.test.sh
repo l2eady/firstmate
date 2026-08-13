@@ -33,27 +33,75 @@ make_fakebin() {
 set -u
 state=${FM_FAKE_DOCKER_STATE:?}
 case "${1:-}" in
-  run|create|container|service|network|volume|compose)
+  run|create)
     printf '%s\n' "$*" >> "$state/log"
-    touch "$state/has-resource"
+    touch "$state/has-container" "$state/has-resource"
+    ;;
+  container|service|compose)
+    printf '%s\n' "$*" >> "$state/log"
+    case "${2:-}" in
+      run|create|up) touch "$state/has-container" "$state/has-resource" ;;
+    esac
+    ;;
+  volume)
+    case "${2:-}" in
+      ls)
+        [ -e "$state/has-volume" ] && printf 'vol1\n'
+        ;;
+      create)
+        touch "$state/has-volume" "$state/has-resource"
+        printf '%s\n' "$*" >> "$state/log"
+        ;;
+      rm)
+        rm -f "$state/has-volume" "$state/has-resource"
+        touch "$state/removed"
+        printf '%s\n' "$*" >> "$state/log"
+        ;;
+    esac
+    ;;
+  network)
+    case "${2:-}" in
+      ls)
+        [ -e "$state/has-network" ] && printf 'net1\n'
+        ;;
+      create)
+        touch "$state/has-network" "$state/has-resource"
+        printf '%s\n' "$*" >> "$state/log"
+        ;;
+      rm)
+        rm -f "$state/has-network" "$state/has-resource"
+        touch "$state/removed"
+        printf '%s\n' "$*" >> "$state/log"
+        ;;
+    esac
     ;;
   ps)
-    [ -e "$state/has-resource" ] || exit 0
+    [ -e "$state/has-container" ] || exit 0
     case "$*" in
       *'com.firstmate.owner='*|*'com.docker.compose.project='*) printf 'cid1\n' ;;
     esac
     ;;
   inspect)
     if [ "${2:-}" = --format ]; then
-      [ -e "$state/removed" ] && exit 1
+      case "${4:-}" in
+        cid1) [ -e "$state/has-container" ] || exit 1 ;;
+        vol1) [ -e "$state/has-volume" ] || exit 1 ;;
+        net1) [ -e "$state/has-network" ] || exit 1 ;;
+        *) exit 1 ;;
+      esac
       printf '%s\tresource-task\tresource-home\ttmux\tfleet:fm-resource-task\tfm-firstmate-resource-task\n' "${FM_FAKE_DOCKER_OWNER:-firstmate:owner:task}"
     else
-      [ ! -e "$state/removed" ] || exit 1
+      case "${2:-}" in
+        cid1) [ -e "$state/has-container" ] || exit 1 ;;
+        vol1) [ -e "$state/has-volume" ] || exit 1 ;;
+        net1) [ -e "$state/has-network" ] || exit 1 ;;
+        *) exit 1 ;;
+      esac
     fi
     ;;
   rm)
     touch "$state/removed"
-    rm -f "$state/has-resource"
+    rm -f "$state/has-container" "$state/has-resource"
     printf '%s\n' "$*" >> "$state/log"
     ;;
 esac
@@ -140,6 +188,10 @@ test_labels_and_teardown_cleanup() {
     || fail "task Docker wrapper failed"
   grep -F -- "--label com.firstmate.owner=$owner" "$DOCKER_STATE/log" >/dev/null \
     || fail "Docker wrapper did not add the exact owner label"
+  ( set -u; eval "$(fm_resource_task_env_line "$manifest")"; "$tasktmp/bin/docker" network create task-net ) \
+    || fail "task Docker network wrapper failed"
+  ( set -u; eval "$(fm_resource_task_env_line "$manifest")"; "$tasktmp/bin/docker" volume create task-volume ) \
+    || fail "task Docker volume wrapper failed"
   touch "$manifest.docker-used" "$manifest.chrome-used"
   ( set -u; eval "$(fm_resource_task_env_line "$manifest")"; "$tasktmp/bin/chrome-devtools-axi" open https://example.invalid ) \
     || fail "task Chrome wrapper failed"
@@ -160,10 +212,28 @@ test_untagged_temp_is_preserved() {
   tasktmp="$TMP_ROOT/fm-$id"
   mkdir -p "$tasktmp"
   owner=$(fm_resource_owner_for "$home" "$ROOT" "$id")
-  fm_resource_remove_task_tmp "$id" "$tasktmp" "$owner" >/dev/null 2>&1 \
-    || fail "untagged temp cleanup should fail closed without an error path"
+  if fm_resource_remove_task_tmp "$id" "$tasktmp" "$owner" >/dev/null 2>&1; then
+    fail "untagged temp cleanup should fail closed without an error path"
+  fi
   [ -d "$tasktmp" ] || fail "cleanup removed a temp root without an owner marker"
   pass "untagged temp roots are preserved"
+}
+
+test_mismatched_docker_owner_is_preserved() {
+  local home owner project
+  home=$(new_home mismatched-docker)
+  owner=$(fm_resource_owner_for "$home" "$ROOT" resource-mismatch)
+  project=$(fm_resource_compose_project_for "$home" "$ROOT" resource-mismatch)
+  rm -f "$DOCKER_STATE/removed"
+  touch "$DOCKER_STATE/has-container" "$DOCKER_STATE/has-resource"
+  if FM_FAKE_DOCKER_OWNER=firstmate:some-other-task FM_FAKE_DOCKER_STATE="$DOCKER_STATE" PATH="$FAKEBIN:$PATH" \
+    fm_resource_docker_cleanup "$owner" resource-mismatch "$project" 1 >/dev/null 2>&1; then
+    fail "Docker cleanup accepted a mismatched owner"
+  fi
+  [ ! -e "$DOCKER_STATE/removed" ] || fail "Docker cleanup removed a resource with a mismatched owner"
+  [ -e "$DOCKER_STATE/has-container" ] || fail "Docker mismatch fixture was unexpectedly removed"
+  rm -f "$DOCKER_STATE/has-container" "$DOCKER_STATE/has-resource"
+  pass "mismatched Docker ownership is preserved"
 }
 
 test_gc_requires_dead_owner() {
@@ -201,4 +271,5 @@ export FM_FAKE_DOCKER_STATE="$DOCKER_STATE" FM_FAKE_CHROME_LOG="$CHROME_LOG"
 
 test_labels_and_teardown_cleanup
 test_untagged_temp_is_preserved
+test_mismatched_docker_owner_is_preserved
 test_gc_requires_dead_owner

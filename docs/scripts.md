@@ -27,6 +27,10 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
+| `fm-resource-lib.sh`     | Shared task-resource ownership manifest, marker, label, cleanup, and liveness primitives |
+| `fm-resource-docker.sh`  | Add exact firstmate ownership labels to Docker resources created by a task |
+| `fm-resource-chrome.sh`  | Forward task Chrome commands with the recorded session and profile and record use |
+| `fm-resource-gc.sh`      | Dry-run or remove resources whose recorded task owner is proven dead |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
 | `backends/tmux.sh`       | Verified tmux session-provider adapter                                               |
 | `backends/herdr.sh`      | Experimental herdr session-provider adapter                                          |
