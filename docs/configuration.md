@@ -193,7 +193,9 @@ Per rule, `when` and `use` are required.
 Absent `select` means use the first array element, or the only object in the single-object form; the first array element is the deterministic tie-break and the ultimate fallback.
 `default` is optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
-If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
+If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability, warns on stderr naming the harness, model, effort, and reason, and omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
+Codex effort is additionally per-model: `max` is a valid codex profile value, but `codex debug models` advertises `supported_reasoning_levels` per model and gpt-5.5 and older stop at `xhigh`, so `fm-spawn.sh` queries the installed CLI for the selected model and omits `max` with that same warning when the model does not advertise it.
+Bootstrap validates the harness/effort pair only, because the model catalog is a runtime property of the installed CLI rather than of the file.
 `quota-balanced` selection is deterministic and implemented by `bin/fm-dispatch-select.sh`, whose header owns the general-window rules, the 20 point stale-clear freshness margin, vendor-availability handling, and the degrade-to-first-element fallbacks; quota trouble never blocks dispatch.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.

@@ -437,30 +437,71 @@ model_flag_for_harness() {
 }
 
 warn_unsupported_effort() {
-  local harness=$1 effort=$2
-  printf 'warning: %s effort %s is unsupported; omitting effort flag\n' "$harness" "$effort" >&2
+  local harness=$1 model=$2 effort=$3 reason=$4
+  printf 'warning: omitting %s effort %s for model %s: %s\n' \
+    "$harness" "$effort" "${model:-default}" "$reason" >&2
+}
+
+# Codex reasoning levels are a per-model capability, not a per-harness one: the
+# 0.147.0 catalog advertises max on the gpt-5.6 line while gpt-5.5 and older stop
+# at xhigh. Read supported_reasoning_levels off the installed CLI rather than
+# hard-coding a model list that rots on every catalog release. Prints the
+# selected model's comma-joined levels, or nothing when the catalog cannot be
+# read (codex or jq absent, command failure, model not listed) so an unreadable
+# catalog never blocks a launch. Always succeeds; callers treat empty as unknown.
+codex_model_reasoning_levels() {
+  local model=$1 catalog
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  command -v codex >/dev/null 2>&1 || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  # Bound the catalog read so a hung or prompting CLI can never stall a spawn.
+  if command -v timeout >/dev/null 2>&1; then
+    catalog=$(timeout 10 codex debug models 2>/dev/null) || catalog=
+  elif command -v gtimeout >/dev/null 2>&1; then
+    catalog=$(gtimeout 10 codex debug models 2>/dev/null) || catalog=
+  else
+    catalog=$(codex debug models 2>/dev/null) || catalog=
+  fi
+  [ -n "$catalog" ] || return 0
+  printf '%s' "$catalog" \
+    | jq -r --arg m "$model" '.models[]? | select(.slug == $m)
+        | [.supported_reasoning_levels[]?.effort] | join(",")' 2>/dev/null \
+    | head -1
+  return 0
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2
+  local harness=$1 model=$2 effort=$3 levels
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
-        *) warn_unsupported_effort "$harness" "$effort" ;;
+        *) warn_unsupported_effort "$harness" "$model" "$effort" "outside firstmate's effort axis low,medium,high,xhigh,max" ;;
       esac
       ;;
     codex)
       # Verified 2026-08-13 with codex-cli 0.147.0 using `codex --version`.
-      # `codex debug models` reported low,medium,high,xhigh,max,ultra for gpt-5.6-sol.
-      # It reported low,medium,high,xhigh,max for gpt-5.6-luna.
-      # Firstmate passes max because it is maximum reasoning without delegation.
-      # Firstmate omits ultra because Codex defines it as automatic task delegation,
-      # which would bypass firstmate's supervised crewmate lifecycle.
+      # max is accepted as a harness capability and then gated on the selected
+      # model's live supported_reasoning_levels above, so a max-capable model
+      # gets the flag and a model that tops out at xhigh gets a warning instead.
+      # ultra stays unsupported on purpose: the catalog describes it as maximum
+      # reasoning with automatic task delegation, so it would hand work to a
+      # delegate outside firstmate's supervised crewmate lifecycle, there is no
+      # real firstmate use case for it, and it has never been tested.
       case "$effort" in
-        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
-        *) warn_unsupported_effort "$harness" "$effort" ;;
+        low|medium|high|xhigh|max)
+          levels=$(codex_model_reasoning_levels "$model") || levels=
+          if [ -z "$levels" ]; then
+            printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")"
+          else
+            case ",$levels," in
+              *",$effort,"*) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+              *) warn_unsupported_effort "$harness" "$model" "$effort" "codex debug models advertises only $levels for this model" ;;
+            esac
+          fi
+          ;;
+        *) warn_unsupported_effort "$harness" "$model" "$effort" "outside firstmate's codex effort axis low,medium,high,xhigh,max" ;;
       esac
       ;;
     grok)
@@ -469,7 +510,7 @@ effort_flag_for_harness() {
       # Grok's profile axis is reasoning effort, and prior verification rejected max.
       case "$effort" in
         low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
-        *) warn_unsupported_effort "$harness" "$effort" ;;
+        *) warn_unsupported_effort "$harness" "$model" "$effort" "grok 0.2.73 rejects --reasoning-effort $effort" ;;
       esac
       ;;
     pi)
@@ -478,12 +519,12 @@ effort_flag_for_harness() {
       # and returned only the expected missing-API-key error, while ultra was rejected.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
-        *) warn_unsupported_effort "$harness" "$effort" ;;
+        *) warn_unsupported_effort "$harness" "$model" "$effort" "pi 0.83.0 rejects --thinking $effort" ;;
       esac
       ;;
     opencode)
       # opencode's interactive `opencode --prompt` launch has no verified effort flag.
-      warn_unsupported_effort "$harness" "$effort"
+      warn_unsupported_effort "$harness" "$model" "$effort" "the interactive opencode --prompt launch has no verified effort flag"
       ;;
   esac
 }
@@ -1089,7 +1130,7 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$MODEL" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
