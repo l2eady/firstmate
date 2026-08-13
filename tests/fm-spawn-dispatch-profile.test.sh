@@ -111,7 +111,28 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    CODEX_HOME="$home/codex-home" \
     "$SPAWN" "$@" 2>&1
+}
+
+# fm-spawn reads codex's own config.toml to resolve the effective model when no
+# --model was passed. CODEX_HOME is pinned per case so the developer's real
+# ~/.codex/config.toml never leaks into these assertions.
+set_codex_config_model() {
+  local home=$1 model=$2
+  mkdir -p "$home/codex-home"
+  printf 'model = "%s"\n' "$model" > "$home/codex-home/config.toml"
+}
+
+# fm-spawn's codex catalog probe needs jq; without it the probe reports the
+# model's levels as unknown and the gate takes its fail-safe path instead of the
+# one under test. Skip rather than report a false regression, matching
+# tests/fm-backend-herdr.test.sh and tests/fm-backend-cmux.test.sh.
+require_jq() {
+  local what=$1
+  command -v jq >/dev/null 2>&1 && return 0
+  echo "skip: $what (jq not found; fm-spawn's codex model catalog probe needs it)"
+  return 1
 }
 
 read_case_record() {
@@ -264,6 +285,7 @@ test_codex_threads_model_and_effort() {
 
 test_codex_threads_max_effort_for_max_capable_model() {
   local rec id out status launch
+  require_jq "codex threads max effort for a max-capable model" || return 0
   id=profile-codex-max-z4
   rec=$(make_spawn_case profile-codex-max codex "$id")
   read_case_record "$rec"
@@ -281,6 +303,7 @@ test_codex_threads_max_effort_for_max_capable_model() {
 
 test_codex_omits_max_for_model_without_max() {
   local rec id out status launch
+  require_jq "codex omits max for a model whose catalog lacks it" || return 0
   id=profile-codex-nomax-z4
   rec=$(make_spawn_case profile-codex-nomax codex "$id")
   read_case_record "$rec"
@@ -299,7 +322,7 @@ test_codex_omits_max_for_model_without_max() {
   pass "codex omits max for a model whose catalog lacks it and warns with the reason"
 }
 
-test_codex_threads_max_when_catalog_unreadable() {
+test_codex_omits_max_when_catalog_unreadable() {
   local rec id out status launch
   id=profile-codex-nocat-z4
   rec=$(make_spawn_case profile-codex-nocat codex "$id")
@@ -310,10 +333,87 @@ test_codex_threads_max_when_catalog_unreadable() {
   status=$?
   expect_code 0 "$status" "codex spawn should succeed when the model catalog cannot be read"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
-    "an unreadable catalog must not drop the requested effort"
-  assert_not_contains "$out" "warning: omitting codex effort" "an unreadable catalog must not warn about an omitted effort"
-  pass "codex keeps the requested effort when the model catalog cannot be read"
+  assert_contains "$launch" "codex --model 'gpt-5.6-luna' --dangerously-bypass-approvals-and-sandbox" \
+    "an unreadable catalog must still preserve the model flag"
+  assert_not_contains "$launch" "model_reasoning_effort" \
+    "an unreadable catalog must not pass max unconfirmed"
+  assert_contains "$out" "warning: omitting codex effort max for model gpt-5.6-luna: the effective model's advertised reasoning levels are unknown, so max cannot be confirmed" \
+    "an unreadable catalog must warn that max could not be confirmed"
+  pass "codex omits max when the model catalog cannot be read"
+}
+
+test_codex_keeps_xhigh_when_catalog_unreadable() {
+  local rec id out status launch
+  id=profile-codex-nocat-xhigh-z4
+  rec=$(make_spawn_case profile-codex-nocat-xhigh codex "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/codex-models.json"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "codex spawn should succeed when the model catalog cannot be read"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"xhigh\"' --dangerously-bypass-approvals-and-sandbox" \
+    "an unreadable catalog must not drop a level every catalog model advertises"
+  assert_not_contains "$out" "warning: omitting codex effort" "xhigh must not warn when the catalog is unreadable"
+  pass "codex keeps xhigh when the model catalog cannot be read"
+}
+
+test_codex_resolves_default_model_from_codex_config_for_max() {
+  local rec id out status launch
+  require_jq "codex resolves its configured default model for max" || return 0
+  id=profile-codex-cfgmax-z4
+  rec=$(make_spawn_case profile-codex-cfgmax codex "$id")
+  read_case_record "$rec"
+  set_codex_config_model "$HOME_DIR" gpt-5.6-luna
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort max)
+  status=$?
+  expect_code 0 "$status" "codex spawn without --model should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex did not thread max for a configured default model that advertises it"
+  assert_not_contains "$out" "warning: omitting codex effort" \
+    "a configured max-capable default model must not warn"
+  pass "codex resolves its configured default model and threads max when that model advertises it"
+}
+
+test_codex_omits_max_for_configured_default_model_without_max() {
+  local rec id out status launch
+  require_jq "codex omits max for a configured default model that lacks it" || return 0
+  id=profile-codex-cfgnomax-z4
+  rec=$(make_spawn_case profile-codex-cfgnomax codex "$id")
+  read_case_record "$rec"
+  set_codex_config_model "$HOME_DIR" gpt-5.5
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort max)
+  status=$?
+  expect_code 0 "$status" "codex spawn without --model should still launch"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "model_reasoning_effort" \
+    "an unselected model must not bypass the per-model gate"
+  assert_contains "$out" "warning: omitting codex effort max for model gpt-5.5: codex debug models advertises only low,medium,high,xhigh for this model" \
+    "codex must warn naming the resolved effective model when it lacks max"
+  pass "codex omits max when its configured default model lacks it"
+}
+
+test_codex_omits_max_when_no_model_resolves() {
+  local rec id out status launch
+  id=profile-codex-nomodel-z4
+  rec=$(make_spawn_case profile-codex-nomodel codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort max)
+  status=$?
+  expect_code 0 "$status" "codex spawn without a resolvable model should still launch"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "model_reasoning_effort" \
+    "max must not reach the launch when no effective model resolves"
+  assert_contains "$out" "warning: omitting codex effort max for model default: the effective model's advertised reasoning levels are unknown, so max cannot be confirmed" \
+    "codex must warn that max could not be confirmed when no model resolves"
+  pass "codex omits max when neither a flag nor its config resolves an effective model"
 }
 
 test_codex_rejects_ultra_explicitly() {
@@ -453,7 +553,11 @@ test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_max_effort_for_max_capable_model
 test_codex_omits_max_for_model_without_max
-test_codex_threads_max_when_catalog_unreadable
+test_codex_omits_max_when_catalog_unreadable
+test_codex_keeps_xhigh_when_catalog_unreadable
+test_codex_resolves_default_model_from_codex_config_for_max
+test_codex_omits_max_for_configured_default_model_without_max
+test_codex_omits_max_when_no_model_resolves
 test_codex_rejects_ultra_explicitly
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
