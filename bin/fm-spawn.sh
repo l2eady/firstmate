@@ -460,15 +460,19 @@ warn_unsupported_effort() {
 # Prints the effective codex model per this script's header contract, or nothing
 # when it does not resolve. Always succeeds; callers treat empty as unknown.
 codex_effective_model() {
-  local model=$1 cfg
+  local model=$1 cfg toplevel
   if [ -n "$model" ] && [ "$model" != default ]; then
     printf '%s\n' "$model"
     return 0
   fi
   cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
   [ -f "$cfg" ] || return 0
-  ! grep -Eq '^[[:space:]]*profile[[:space:]]*=' "$cfg" || return 0
-  sed -n '/^[[:space:]]*\[/q; s/^[[:space:]]*model[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$cfg" \
+  toplevel=$(sed -n '/^[[:space:]]*\[/q;p' "$cfg") || toplevel=
+  ! printf '%s\n' "$toplevel" | grep -Eq '^[[:space:]]*profile[[:space:]]*=' || return 0
+  printf '%s\n' "$toplevel" \
+    | sed -n \
+      -e 's/^[[:space:]]*model[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+      -e "s/^[[:space:]]*model[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" \
     | head -1
   return 0
 }

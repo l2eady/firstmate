@@ -103,6 +103,14 @@ set_codex_config_model() {
   printf 'model = "%s"\n' "$model" > "$home/codex-home/config.toml"
 }
 
+# Writes a config.toml body verbatim, for the TOML forms set_codex_config_model's
+# double-quoted shape does not cover.
+write_codex_config() {
+  local home=$1 body=$2
+  mkdir -p "$home/codex-home"
+  printf '%s\n' "$body" > "$home/codex-home/config.toml"
+}
+
 # fm-spawn's codex catalog probe needs jq; without it the probe reports the
 # model's levels as unknown and the gate takes its fail-safe path instead of the
 # one under test. Skip rather than report a false regression, matching
@@ -358,6 +366,59 @@ test_codex_resolves_default_model_from_codex_config_for_max() {
   pass "codex resolves its configured default model and threads max when that model advertises it"
 }
 
+# TOML accepts literal single-quoted strings as well as basic double-quoted ones,
+# and a `profile =` key belongs to whichever table it sits under, so a later
+# table's key must not mask the top-level model. Each row is a distinct valid
+# config.toml whose top-level model is the max-capable gpt-5.6-luna.
+test_codex_resolves_default_model_across_toml_forms() {
+  local rec id out status launch name body n=0
+  require_jq "codex resolves its configured default model across TOML forms" || return 0
+  while IFS='^' read -r name body; do
+    [ -n "$name" ] || continue
+    n=$((n + 1))
+    id="profile-codex-toml-$n-z4"
+    rec=$(make_spawn_case "profile-codex-toml-$n" codex "$id")
+    read_case_record "$rec"
+    write_codex_config "$HOME_DIR" "$(printf '%b' "$body")"
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort max)
+    status=$?
+    expect_code 0 "$status" "$name: codex spawn without --model should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "codex -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+      "$name: codex did not resolve the top-level model and thread max"
+    assert_not_contains "$out" "warning: omitting codex effort" "$name: a max-capable configured model must not warn"
+  done <<'ROWS'
+literal single-quoted string^model = 'gpt-5.6-luna'
+double-quoted with a trailing comment^model = "gpt-5.6-luna" # pinned
+padded single-quoted string^  model   =   'gpt-5.6-luna'
+profile key under a later table^model = 'gpt-5.6-luna'\n[tui]\nprofile = "something"
+ROWS
+  [ "$n" -eq 4 ] || fail "expected 4 TOML forms exercised, got $n"
+  pass "codex resolves a top-level model across valid TOML quoting forms and table scoping"
+}
+
+# A top-level `profile =` selects a named profile whose own model key this parser
+# deliberately does not follow, so the effective model stays unresolved and max
+# fails safe rather than being read off the wrong key.
+test_codex_omits_max_when_a_top_level_profile_is_selected() {
+  local rec id out status launch
+  id=profile-codex-tomlprofile-z4
+  rec=$(make_spawn_case profile-codex-tomlprofile codex "$id")
+  read_case_record "$rec"
+  write_codex_config "$HOME_DIR" "$(printf 'profile = "work"\nmodel = "gpt-5.6-luna"\n')"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort max)
+  status=$?
+  expect_code 0 "$status" "codex spawn with a selected profile should still launch"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "model_reasoning_effort" \
+    "a selected profile leaves the effective model unresolved, so max must not pass"
+  assert_contains "$out" "warning: omitting codex effort max for model default: the effective model's advertised reasoning levels are unknown, so max cannot be confirmed" \
+    "codex must warn that max could not be confirmed when a profile is selected"
+  pass "codex omits max when a top-level profile selection leaves the effective model unresolved"
+}
+
 test_codex_omits_max_for_configured_default_model_without_max() {
   local rec id out status launch
   require_jq "codex omits max for a configured default model that lacks it" || return 0
@@ -543,6 +604,8 @@ test_codex_omits_max_for_model_without_max
 test_codex_omits_max_when_catalog_unreadable
 test_codex_keeps_xhigh_when_catalog_unreadable
 test_codex_resolves_default_model_from_codex_config_for_max
+test_codex_resolves_default_model_across_toml_forms
+test_codex_omits_max_when_a_top_level_profile_is_selected
 test_codex_omits_max_for_configured_default_model_without_max
 test_codex_omits_max_when_no_model_resolves
 test_effort_axis_rejects_ultra_for_every_harness
