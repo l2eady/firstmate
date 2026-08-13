@@ -25,9 +25,9 @@
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
-#      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      checks" from "checks green, waiting on merge" (see nm_ci_checks_state).
+#      The firstmate-side GitHub check verifies a no-CI result after a short
+#      grace and reports it as `no CI checks available`, never as checks green.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -61,6 +61,10 @@ META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
+NM_GITHUB_TIMEOUT=${FM_CREW_STATE_GITHUB_TIMEOUT:-10}
+case "$NM_GITHUB_TIMEOUT" in ''|*[!0-9]*) NM_GITHUB_TIMEOUT=10 ;; esac
+NM_CI_NO_CHECKS_GRACE_SECS=${FM_CI_NO_CHECKS_GRACE_SECS:-3}
+case "$NM_CI_NO_CHECKS_GRACE_SECS" in ''|*[!0-9]*) NM_CI_NO_CHECKS_GRACE_SECS=3 ;; esac
 # How many of the most recent `no-mistakes runs` rows the cross-branch fallback
 # (nm_runs_status_for_branch, below) scans. Generous enough to still find a
 # branch's own run on a busy multi-crew fleet without listing the entire
@@ -320,6 +324,76 @@ nm_effective_ci_step_status() {
   fi
 }
 
+nm_github_pr_parts() {  # <pr-url>
+  local pr=$1
+  if [[ "$pr" =~ ^https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]+)/pull/([0-9]+)/?$ ]]; then
+    printf '%s\t%s\t%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+    return 0
+  fi
+  return 1
+}
+
+nm_github_pr_checks_once() {  # <pr-url>
+  local pr=$1 parts owner repo number
+  NM_GITHUB_CHECKS_OUTPUT=
+  NM_GITHUB_CHECKS_STATUS=1
+  parts=$(nm_github_pr_parts "$pr" 2>/dev/null || true)
+  [ -n "$parts" ] || return 0
+  IFS=$'\t' read -r owner repo number <<EOF
+$parts
+EOF
+  command -v gh-axi >/dev/null 2>&1 || return 0
+  case "$HAVE_TIMEOUT" in
+    timeout)
+      NM_GITHUB_CHECKS_OUTPUT=$(timeout "$NM_GITHUB_TIMEOUT" gh-axi pr checks "$number" --repo "$owner/$repo" 2>&1)
+      NM_GITHUB_CHECKS_STATUS=$?
+      ;;
+    gtimeout)
+      NM_GITHUB_CHECKS_OUTPUT=$(gtimeout "$NM_GITHUB_TIMEOUT" gh-axi pr checks "$number" --repo "$owner/$repo" 2>&1)
+      NM_GITHUB_CHECKS_STATUS=$?
+      ;;
+    perl)
+      NM_GITHUB_CHECKS_OUTPUT=$(perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_GITHUB_TIMEOUT" gh-axi pr checks "$number" --repo "$owner/$repo" 2>&1)
+      NM_GITHUB_CHECKS_STATUS=$?
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+nm_github_pr_checks_state() {  # <output> <status>
+  local output=$1 status=$2 lower
+  lower=$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')
+  case "$lower" in
+    *"no ci checks configured"*) printf 'no-ci'; return 0 ;;
+    *failed*|*failure*|*cancelled*|*"timed out"*) printf 'not-ready'; return 0 ;;
+    *pending*|*queued*|*"in progress"*|*expected*) printf 'not-ready'; return 0 ;;
+    *"checks passed"*|*" passed,"*|*success*)
+      [ "$status" -eq 0 ] && { printf 'green'; return 0; }
+      ;;
+  esac
+  printf 'unknown'
+}
+
+nm_github_ci_state() {  # <pr-url>
+  local pr=$1 first second
+  nm_github_pr_checks_once "$pr"
+  first=$(nm_github_pr_checks_state "$NM_GITHUB_CHECKS_OUTPUT" "$NM_GITHUB_CHECKS_STATUS")
+  case "$first" in
+    no-ci)
+      [ "$NM_CI_NO_CHECKS_GRACE_SECS" -eq 0 ] || sleep "$NM_CI_NO_CHECKS_GRACE_SECS"
+      nm_github_pr_checks_once "$pr"
+      second=$(nm_github_pr_checks_state "$NM_GITHUB_CHECKS_OUTPUT" "$NM_GITHUB_CHECKS_STATUS")
+      case "$second" in
+        no-ci|green|not-ready) printf '%s' "$second" ;;
+        *) printf 'unknown' ;;
+      esac
+      ;;
+    *) printf '%s' "$first" ;;
+  esac
+}
+
 # Root cause of the PR #252 incident (2026-07): for a repo where merge is left
 # to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
 # stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
@@ -333,8 +407,8 @@ nm_effective_ci_step_status() {
 # ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
 # actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
-# so the last match is current): green with nothing red after it means CI is
-# green right now, still only waiting on merge/close.
+# so the last match is current). A no-CI marker is accepted only after a
+# firstmate-side `gh-axi pr checks` confirmation survives a short grace period.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
@@ -345,7 +419,8 @@ nm_ci_checks_state() {
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    *"checks passed"*) printf 'green' ;;
+    *"no CI checks reported - still monitoring"*) nm_github_ci_state "$(strip_quotes "$(nm_field pr)")" ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
@@ -507,6 +582,9 @@ if [ "$HAVE_RUN" = 1 ]; then
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+            elif [ "$CI_LOG_STATE" = no-ci ]; then
+              RUN_STATE="done"
+              RUN_DETAIL="no CI checks available: PR ready for review (stop waiting for CI)"
             fi
             ;;
           fixing)
@@ -529,7 +607,9 @@ if [ "$HAVE_RUN" = 1 ]; then
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
+    if [ "$CI_LOG_STATE" = no-ci ]; then
+      emit "done" status-log "no CI checks available: stop waiting for CI"
+    elif [ "$CI_LOG_STATE" != not-ready ]; then
       emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi

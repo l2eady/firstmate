@@ -90,6 +90,26 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  cat > "$fb/gh-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = pr ] && [ "${2:-}" = checks ]; then
+  output=${FM_FAKE_GH_CHECKS_OUTPUT:-'checks: "0 passed, 0 failed - this PR has no CI checks configured"'}
+  status=${FM_FAKE_GH_CHECKS_STATUS:-0}
+  if [ -n "${FM_FAKE_GH_CHECKS_CALLS_FILE:-}" ]; then
+    count=$(cat "$FM_FAKE_GH_CHECKS_CALLS_FILE" 2>/dev/null || printf '0')
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_FAKE_GH_CHECKS_CALLS_FILE"
+    if [ "$count" -gt 1 ] && [ -n "${FM_FAKE_GH_CHECKS_SECOND_OUTPUT:-}" ]; then
+      output=$FM_FAKE_GH_CHECKS_SECOND_OUTPUT
+      status=${FM_FAKE_GH_CHECKS_SECOND_STATUS:-0}
+    fi
+  fi
+  printf '%s\n' "$output"
+  exit "$status"
+fi
+exit 0
+SH
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -119,7 +139,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh-axi" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -159,8 +179,16 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_GH_CHECKS_OUTPUT=""
+  FM_FAKE_GH_CHECKS_STATUS=0
+  FM_FAKE_GH_CHECKS_CALLS_FILE=""
+  FM_FAKE_GH_CHECKS_SECOND_OUTPUT=""
+  FM_FAKE_GH_CHECKS_SECOND_STATUS=0
+  FM_CI_NO_CHECKS_GRACE_SECS=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_GH_CHECKS_OUTPUT FM_FAKE_GH_CHECKS_STATUS FM_FAKE_GH_CHECKS_CALLS_FILE
+  export FM_FAKE_GH_CHECKS_SECOND_OUTPUT FM_FAKE_GH_CHECKS_SECOND_STATUS FM_CI_NO_CHECKS_GRACE_SECS
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -498,8 +526,41 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
   assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  assert_contains "$out" "no CI checks available" "terminal no-checks detail names absent CI"
+  assert_not_contains "$out" "checks green" "terminal no-checks detail is not green"
+  pass "terminal no-checks ci-monitor marker surfaces a distinct no-CI state"
+}
+
+test_ci_monitoring_no_checks_rechecks_before_done() {
+  reset_fakes
+  local d; d=$(new_case ci-nochecks-recheck)
+  make_repo_on_branch "$d/wt" fm/feat-cinochecks-recheck
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinochecks-recheck.meta" "window=fm:fm-feat-cinochecks-recheck" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks-recheck)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  FM_FAKE_GH_CHECKS_CALLS_FILE="$d/gh-checks.calls"
+  local out; out=$(run_crew_state "$d" feat-cinochecks-recheck)
+  assert_contains "$out" "no CI checks available" "confirmed no-checks result surfaces as no-CI"
+  [ "$(cat "$d/gh-checks.calls")" = 2 ] || fail "no-checks result was not checked twice"
+  pass "no-CI conclusion gets a second GitHub check after the grace path"
+}
+
+test_ci_monitoring_no_checks_transient_error_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-nochecks-transient)
+  make_repo_on_branch "$d/wt" fm/feat-cinochecks-transient
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinochecks-transient.meta" "window=fm:fm-feat-cinochecks-transient" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks-transient)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  FM_FAKE_GH_CHECKS_CALLS_FILE="$d/gh-checks.calls"
+  FM_FAKE_GH_CHECKS_SECOND_OUTPUT="temporary GitHub API failure"
+  FM_FAKE_GH_CHECKS_SECOND_STATUS=1
+  local out; out=$(run_crew_state "$d" feat-cinochecks-transient)
+  assert_contains "$out" "state: working" "transient GitHub failure stays working"
+  assert_not_contains "$out" "no CI checks available" "transient GitHub failure is not no-CI"
+  pass "transient GitHub failure does not become a false no-CI conclusion"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -1096,6 +1157,8 @@ test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_no_checks_rechecks_before_done
+test_ci_monitoring_no_checks_transient_error_stays_working
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working

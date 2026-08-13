@@ -120,6 +120,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-resource-lib.sh
+. "$SCRIPT_DIR/fm-resource-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 FM_LOCK_LOG_PREFIX=teardown
@@ -142,6 +144,9 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+RESOURCE_MANIFEST=$(grep '^resource_manifest=' "$META" | cut -d= -f2- || true)
+RESOURCE_HOME=$(grep '^resource_home=' "$META" | cut -d= -f2- || true)
+RESOURCE_ROOT=$(grep '^resource_root=' "$META" | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
 
@@ -936,7 +941,7 @@ validate_firstmate_home_children_removal() {
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_archived
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_archived child_tasktmp child_resource_manifest child_resource_home child_resource_root
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -967,6 +972,17 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
+    child_tasktmp=$(meta_value "$child_meta" tasktmp)
+    child_resource_manifest=$(meta_value "$child_meta" resource_manifest)
+    child_resource_home=$(meta_value "$child_meta" resource_home)
+    child_resource_root=$(meta_value "$child_meta" resource_root)
+    if [ -z "$child_resource_home" ]; then
+      child_resource_home=$home
+    fi
+    if [ -z "$child_resource_root" ]; then
+      child_resource_root=$FM_ROOT
+    fi
+    fm_resource_cleanup_task "$child_id" "$child_resource_home" "$child_resource_root" "$sub_state" "$child_tasktmp" "$child_resource_manifest" || return 1
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -1122,13 +1138,23 @@ if [ "$BACKEND" != orca ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  [ -n "$RESOURCE_HOME" ] || RESOURCE_HOME=$HOME_PATH
+  [ -n "$RESOURCE_ROOT" ] || RESOURCE_ROOT=$HOME_PATH
+  fm_resource_cleanup_task "$ID" "$RESOURCE_HOME" "$RESOURCE_ROOT" "$STATE" "$TASK_TMP" "$RESOURCE_MANIFEST" || {
+    echo "error: task resource cleanup failed for $ID; preserving resource metadata for fm-resource-gc.sh" >&2
+    exit 1
+  }
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
   remove_secondmate_registry_entry "$ID"
+else
+  [ -n "$RESOURCE_HOME" ] || RESOURCE_HOME=$FM_HOME
+  [ -n "$RESOURCE_ROOT" ] || RESOURCE_ROOT=$FM_ROOT
+  fm_resource_cleanup_task "$ID" "$RESOURCE_HOME" "$RESOURCE_ROOT" "$STATE" "$TASK_TMP" "$RESOURCE_MANIFEST" || {
+    echo "error: task resource cleanup failed for $ID; preserving resource metadata for fm-resource-gc.sh" >&2
+    exit 1
+  }
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
-# Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 if ! ARCHIVED=$(archive_task_status "$STATE" "$ID" "$STATUS_ARCHIVE"); then
   echo "error: could not archive status log $STATE/$ID.status to $STATUS_ARCHIVE; teardown aborted" >&2
   echo "The log is the only record of this task's wake history and is still in place; fix the archive path and re-run." >&2
