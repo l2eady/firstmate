@@ -53,6 +53,8 @@ make_fake_root() {
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
+  ln -s "$ROOT/bin/fm-backend-hometag-lib.sh" "$fake/bin/fm-backend-hometag-lib.sh"
+  ln -s "$ROOT/bin/fm-resource-lib.sh" "$fake/bin/fm-resource-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
@@ -83,6 +85,15 @@ mode=no-mistakes
 yolo=off
 tasktmp=$tasktmp
 META
+  if [ -d "$tasktmp" ]; then
+    local owner
+    owner=$(FM_HOME="$fake" FM_ROOT="$fake" bash -c '. "$1/bin/fm-resource-lib.sh"; fm_resource_owner_for "$2" "$2" "$3"' _ "$ROOT" "$fake" "$id")
+    {
+      printf 'version=1\n'
+      printf 'owner=%s\n' "$owner"
+      printf 'task=%s\n' "$id"
+    } > "$tasktmp/.fm-resource-owner"
+  fi
   printf '%s' "$fake"
 }
 
@@ -132,8 +143,9 @@ test_teardown_removes_tasktmp_dir() {
   # Sanity: dir + contents exist before teardown.
   [ -d "$task_tmp/gotmp" ] || fail "precondition: gotmp missing before teardown"
   # Run the REAL teardown against the fake root.
-  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
-    || fail "teardown exited non-zero with a valid tasktmp"
+  local teardown_output
+  teardown_output=$(FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1) \
+    || { printf '%s\n' "$teardown_output" >&2; fail "teardown exited non-zero with a valid tasktmp"; }
   [ ! -e "$task_tmp" ] \
     || fail "teardown did not remove the tasktmp dir ($task_tmp still exists)"
   pass "fm-teardown removes the dir pointed to by tasktmp= in meta"
@@ -150,6 +162,8 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
+  ln -s "$ROOT/bin/fm-backend-hometag-lib.sh" "$fake/bin/fm-backend-hometag-lib.sh"
+  ln -s "$ROOT/bin/fm-resource-lib.sh" "$fake/bin/fm-resource-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -174,8 +188,9 @@ kind=ship
 mode=no-mistakes
 yolo=off
 META
-  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
-    || fail "teardown exited non-zero when tasktmp= was absent"
+  local teardown_output
+  teardown_output=$(FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1) \
+    || { printf '%s\n' "$teardown_output" >&2; fail "teardown exited non-zero when tasktmp= was absent"; }
   pass "fm-teardown skips gracefully when tasktmp= is absent (backward compat)"
 }
 

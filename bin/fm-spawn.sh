@@ -134,6 +134,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-resource-lib.sh
+. "$SCRIPT_DIR/fm-resource-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -1190,6 +1192,25 @@ fi
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 
+# Resource ownership is established before the agent launch, so a killed agent
+# cannot take the ownership record with it. A task that explicitly connects to a
+# captain-owned browser keeps that browser unowned and is never stopped by teardown.
+BROWSER_RESOURCE_OWNED=1
+[ -z "${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}" ] || BROWSER_RESOURCE_OWNED=0
+if [ "${CHROME_DEVTOOLS_AXI_AUTO_CONNECT:-0}" = 1 ] || [ "${CHROME_DEVTOOLS_AXI_AUTO_CONNECT:-0}" = true ]; then
+  BROWSER_RESOURCE_OWNED=0
+fi
+[ -z "${CHROME_DEVTOOLS_AXI_USER_DATA_DIR:-}" ] || BROWSER_RESOURCE_OWNED=0
+RESOURCE_HOME=$FM_HOME
+RESOURCE_ROOT=$FM_ROOT
+if [ "$KIND" = secondmate ]; then
+  RESOURCE_HOME=$PROJ_ABS
+  RESOURCE_ROOT=$PROJ_ABS
+fi
+TASK_RESOURCE_MANIFEST=$(fm_resource_prepare_task "$ID" "$RESOURCE_HOME" "$RESOURCE_ROOT" "$STATE" "$TASK_TMP" "$BACKEND" "$T" "$BROWSER_RESOURCE_OWNED")
+TASK_RESOURCE_OWNER=$(fm_resource_manifest_get "$TASK_RESOURCE_MANIFEST" owner)
+RESOURCE_ENV=$(fm_resource_task_env_line "$TASK_RESOURCE_MANIFEST")
+
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
 # they never block teardown's dirty check or leak into a commit.
@@ -1320,6 +1341,10 @@ META_WINDOW=$T
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  echo "resource_manifest=$TASK_RESOURCE_MANIFEST"
+  echo "resource_owner=$TASK_RESOURCE_OWNER"
+  echo "resource_home=$RESOURCE_HOME"
+  echo "resource_root=$RESOURCE_ROOT"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -1382,6 +1407,12 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+while IFS= read -r resource_env_line; do
+  [ -n "$resource_env_line" ] || continue
+  spawn_send_text_line "$T" "$resource_env_line"
+done <<EOF
+$RESOURCE_ENV
+EOF
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
