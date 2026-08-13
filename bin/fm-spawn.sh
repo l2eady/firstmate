@@ -24,6 +24,12 @@
 #   reaching a launch that cannot honor it. ultra is never passed: codex defines it
 #   as maximum reasoning with automatic task delegation, which is outside
 #   firstmate's supervised crewmate lifecycle, and it is untested here.
+#   A RAW launch command is the one axis-threading exception: firstmate runs it
+#   verbatim, so neither --model nor --effort can reach it. Both are then ignored
+#   with an explicit stderr warning and the spawn continues rather than erroring,
+#   because refusing would break the escape hatch's whole purpose - launching an
+#   unverified adapter by hand, where the raw command already carries whatever
+#   model and effort flags that adapter wants.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
@@ -57,7 +63,8 @@
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
 #   harness from config/secondmate-harness. An explicit per-spawn --harness,
 #   positional harness arg, or raw launch command starts with clean model/effort
-#   defaults unless the caller also passes explicit --model/--effort flags. When
+#   defaults unless the caller also passes explicit --model/--effort flags - which a
+#   raw launch records in meta but still ignores at launch, per the exception above. When
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
@@ -102,7 +109,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,93p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,100p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -362,13 +369,24 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    RAW_LAUNCH=1
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
+    # A raw command carries no __MODELFLAG__/__EFFORTFLAG__ placeholders, so the
+    # profile axes cannot be threaded into it. Warn and continue per this script's
+    # header contract; erroring would break the escape hatch this branch exists for.
+    if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+      echo "warning: ignoring --model $MODEL: the raw launch command controls the entire launch, so firstmate adds no model flag" >&2
+    fi
+    if [ -n "$EFFORT" ] && [ "$EFFORT" != default ]; then
+      echo "warning: ignoring --effort $EFFORT: the raw launch command controls the entire launch, so firstmate adds no effort flag" >&2
+    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1162,8 +1180,16 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$MODEL" "$EFFORT")
+# A raw launch already warned that both axes are ignored; skip the per-harness
+# resolution so a raw command whose first word matches a known adapter cannot emit
+# a second, adapter-specific warning about a launch firstmate does not build.
+if [ "$RAW_LAUNCH" -eq 1 ]; then
+  MODELFLAG=
+  EFFORTFLAG=
+else
+  MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+  EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$MODEL" "$EFFORT")
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}

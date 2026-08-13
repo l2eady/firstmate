@@ -238,6 +238,29 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+test_raw_launch_command_warns_when_profile_axes_are_ignored() {
+  local rec id out status launch
+  id=profile-raw-warn-z16
+  rec=$(make_spawn_case profile-raw-warn claude "$id")
+  read_case_record "$rec"
+
+  # The raw first word is a known adapter name on purpose: the raw branch must own
+  # the warning, not the per-harness effort gate for a launch it never builds.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "grok --always-approve" --model grok-4 --effort max)
+  status=$?
+  expect_code 0 "$status" "raw launch with profile axes should still launch"
+  assert_contains "$out" "warning: ignoring --model grok-4: the raw launch command controls the entire launch" \
+    "raw launch must warn that --model is ignored"
+  assert_contains "$out" "warning: ignoring --effort max: the raw launch command controls the entire launch" \
+    "raw launch must warn that --effort is ignored"
+  assert_not_contains "$out" "warning: omitting grok effort" \
+    "raw launch must not emit the per-harness effort warning"
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "grok --always-approve" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  pass "raw launch command warns on stderr and launches unchanged when profile axes are passed"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -597,6 +620,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_launch_command_warns_when_profile_axes_are_ignored
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_max_effort_for_max_capable_model
