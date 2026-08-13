@@ -75,6 +75,9 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   Reusing an existing task id currently allocates a fresh worktree instead of adopting the
+#   old one, so commit live WIP before changing harness, model, or effort or relaunching; the
+#   worktree-adoption follow-up is tracked as fm-spawn-worktree-identity-z11.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real

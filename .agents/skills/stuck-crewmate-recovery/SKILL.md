@@ -22,5 +22,5 @@ Escalate in order:
 4. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch with the same brief plus a `progress so far` note appended to it.
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
-   The worktree and commits persist, so relaunch is cheap.
+   Committed work persists across relaunch, but uncommitted WIP can be stranded by a fresh `fm-spawn`; before any harness, model, or effort change, follow the pre-relaunch WIP rule in `harness-adapters`.
 5. If a second relaunch fails too, write `failed` to the backlog and tell the captain with evidence.

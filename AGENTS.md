@@ -565,7 +565,7 @@ If it reports failure, drain queued wakes first and then repair supervision acco
 **No turn ends blind, holds included.**
 Never end a turn while any task is in flight without the active harness supervision protocol live: a text-only "holding" or "waiting" reply with crewmates live and no live cycle is a bug, and because such a turn runs no supervision script it is exactly the blind gap the script-only guard (`fm-guard.sh`, below) cannot catch, so this discipline must.
 If a forced restart is ever genuinely needed, use `bin/fm-watch-arm.sh --restart`, which signals only this home's recorded watcher and then owns a fresh cycle or reports restart-only `healthy` without attaching if a healthy peer still holds the lock.
-Never `pkill -f bin/fm-watch.sh`: that pattern matches every firstmate home's watcher, including secondmate homes that run the same script, so a broad pkill from one home kills sibling homes' watchers.
+Never use broad `pkill -f` against a pattern that appears anywhere in a crewmate launch line, including `pkill -f bin/fm-watch.sh`: the pattern can match live crewmates or every firstmate home's watcher, including secondmate homes that run the same script.
 Away-mode supervision is provided by the `/afk` skill and its daemon; while `state/.afk` exists, the daemon owns the watcher.
 Waiting on the watcher is intentionally silent.
 After starting the active harness supervision wait, do not send idle progress updates to the captain; wait until it returns `signal`, `stale`, `check`, or `heartbeat`, unless the captain asks for status.
@@ -787,3 +787,10 @@ On an `x-mention <request_id>` or `x-mode-error ...` `check:` wake, load `fmx-re
 It owns mention classification, acting on the request, reply composition, voice, thread-splitting, image attachments, dry-run preview, and the completion-follow-up procedure in full, including what an `x-mode-error` wake means instead.
 `docs/configuration.md` "X mode (.env)" has the wire-protocol reference.
 The one fact that must survive here because it fires on a generic terminal wake, not the mention wake itself: when an X-mode-linked task reaches a terminal state, post its final completion follow-up per section 8's wake-handling step before tearing down.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.

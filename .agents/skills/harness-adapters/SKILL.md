@@ -90,6 +90,11 @@ Re-verify a row against the installed CLI and re-date only that row when you cha
 
 `fm-spawn` always records the requested `effort=` in meta; when it cannot pass that effort to the harness it omits the flag and warns on stderr, per the resolution contract in `bin/fm-spawn.sh`'s header (`bin/fm-spawn.sh --help`).
 
+## Pre-relaunch WIP safety
+
+Before exiting or respawning a live task to change its harness, model, or effort, require the lane to commit its uncommitted work.
+`fm-spawn` currently allocates a fresh worktree when an existing task id is relaunched, so uncommitted WIP can remain in the old worktree; the exact behavior and tracked follow-up are owned by `bin/fm-spawn.sh --help`.
+
 ## no-mistakes skill invocation
 
 Send the validation skill using the target harness's skill invocation form.
