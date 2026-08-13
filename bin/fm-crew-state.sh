@@ -367,9 +367,19 @@ nm_github_pr_checks_state() {  # <output> <status>
   lower=$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')
   case "$lower" in
     *"no ci checks configured"*) printf 'no-ci'; return 0 ;;
-    *failed*|*failure*|*cancelled*|*"timed out"*) printf 'not-ready'; return 0 ;;
+    *failure*|*cancelled*|*"timed out"*) printf 'not-ready'; return 0 ;;
     *pending*|*queued*|*"in progress"*|*expected*) printf 'not-ready'; return 0 ;;
-    *"checks passed"*|*" passed,"*|*success*)
+  esac
+  if printf '%s' "$lower" | grep -Eq '(^|[^0-9])[1-9][0-9]*[[:space:]]+failed([[:space:],]|$)'; then
+    printf 'not-ready'
+    return 0
+  fi
+  if [ "$status" -eq 0 ] && printf '%s' "$lower" | grep -Eq '(^|[^0-9])[1-9][0-9]*[[:space:]]+passed([[:space:],]|$)'; then
+    printf 'green'
+    return 0
+  fi
+  case "$lower" in
+    *"checks passed"*|*success*)
       [ "$status" -eq 0 ] && { printf 'green'; return 0; }
       ;;
   esac

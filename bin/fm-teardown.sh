@@ -38,8 +38,8 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Resource cleanup is task-scoped: teardown currently clears the recorded endpoint, hooks, temporary root, and worktree, but does not yet collect team-owned database containers or Chrome processes.
-# The 2026-08-13 evidence and required ownership follow-up are documented in docs/teardown-resource-cleanup.md; never compensate with broad process or tab kills.
+# Resource cleanup is task-scoped: teardown clears the recorded endpoint, hooks, temporary root, worktree, and manifest resources only after exact ownership checks.
+# The 2026-08-13 ownership contract and orphan collector are documented in docs/teardown-resource-cleanup.md; never compensate with broad process or tab kills.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it

@@ -124,6 +124,13 @@ fm_resource_prepare_task() {  # <id> <home> <root> <state> <tasktmp> <backend> <
   else
     mkdir -p "$tasktmp" || return 1
   fi
+  local child
+  for child in "$tasktmp/gotmp" "$tasktmp/bin" "$profile"; do
+    if [ -e "$child" ] && { [ ! -d "$child" ] || [ -L "$child" ]; }; then
+      echo "REFUSED: task resource path is not a real directory: $child" >&2
+      return 1
+    fi
+  done
   mkdir -p "$tasktmp/gotmp" "$tasktmp/bin" "$profile" || return 1
 
   if [ -e "$marker" ] && { [ ! -f "$marker" ] || [ -L "$marker" ]; }; then
@@ -236,6 +243,10 @@ fm_resource_validate_task_tmp() {  # <id> <tasktmp> <owner>
       ;;
   esac
   marker="$abs/$FM_RESOURCE_OWNER_MARKER"
+  if [ -e "$marker" ] && { [ ! -f "$marker" ] || [ -L "$marker" ]; }; then
+    echo "REFUSED: task temp owner marker is not a regular file: $marker" >&2
+    return 1
+  fi
   marker_owner=$(fm_resource_marker_get "$marker" owner)
   marker_task=$(fm_resource_marker_get "$marker" task)
   if [ "$marker_owner" != "$owner" ] || [ "$marker_task" != "$id" ]; then
@@ -253,14 +264,18 @@ fm_resource_remove_task_tmp() {  # <id> <tasktmp> <owner>
     return $?
   else
     rc=$?
-    [ "$rc" -eq 2 ] && return 0
     return "$rc"
   fi
 }
 
-fm_resource_docker_ids_for_label() {  # <label-key> <label-value>
-  local key=$1 value=$2
-  docker ps -aq --filter "label=$key=$value" 2>/dev/null
+fm_resource_docker_ids_for_label() {  # <resource-kind> <label-key> <label-value>
+  local kind=$1 key=$2 value=$3
+  case "$kind" in
+    container) docker ps -aq --filter "label=$key=$value" 2>/dev/null ;;
+    volume) docker volume ls -q --filter "label=$key=$value" 2>/dev/null ;;
+    network) docker network ls -q --filter "label=$key=$value" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_resource_docker_cleanup() {  # <owner> <task> <compose-project> <require-daemon>
@@ -273,7 +288,7 @@ fm_resource_docker_cleanup() {  # <owner> <task> <compose-project> <require-daem
     }
     return 0
   }
-  ids=$(fm_resource_docker_ids_for_label "$FM_RESOURCE_OWNER_LABEL" "$owner") || {
+  ids=$(fm_resource_docker_ids_for_label container "$FM_RESOURCE_OWNER_LABEL" "$owner") || {
     [ "$require_daemon" = 1 ] && echo "error: Docker label query failed for $owner" >&2
     [ "$require_daemon" = 1 ] && return 1
     return 0
@@ -282,11 +297,11 @@ fm_resource_docker_cleanup() {  # <owner> <task> <compose-project> <require-daem
     while IFS= read -r cid; do
       [ -n "$cid" ] || continue
       case " $ids " in *" $cid "*) ;; *) ids="$ids${ids:+$'\n'}$cid" ;; esac
-    done < <(fm_resource_docker_ids_for_label com.docker.compose.project "$compose")
+    done < <(fm_resource_docker_ids_for_label container com.docker.compose.project "$compose")
   fi
   for cid in $ids; do
     case "$cid" in
-      ''|*[!A-Za-z0-9]*)
+      ''|*[!A-Za-z0-9_.-]*)
         echo "REFUSED: Docker returned an unsafe resource id for $owner: $cid" >&2
         return 1
         ;;
@@ -324,11 +339,78 @@ EOF
   done
 }
 
+fm_resource_docker_cleanup_noncontainers() {  # <owner> <task> <compose-project> <require-daemon>
+  local owner=$1 task=$2 compose=$3 require_daemon=${4:-0}
+  local kind ids cid labels actual_owner actual_task actual_project
+  command -v docker >/dev/null 2>&1 || {
+    [ "$require_daemon" = 1 ] && {
+      echo "error: Docker is required to clean resources tagged for $owner" >&2
+      return 1
+    }
+    return 0
+  }
+  for kind in volume network; do
+    ids=$(fm_resource_docker_ids_for_label "$kind" "$FM_RESOURCE_OWNER_LABEL" "$owner") || {
+      [ "$require_daemon" = 1 ] && echo "error: Docker $kind label query failed for $owner" >&2
+      [ "$require_daemon" = 1 ] && return 1
+      continue
+    }
+    if [ -n "$compose" ]; then
+      while IFS= read -r cid; do
+        [ -n "$cid" ] || continue
+        case " $ids " in *" $cid "*) ;; *) ids="$ids${ids:+$'\n'}$cid" ;; esac
+      done < <(fm_resource_docker_ids_for_label "$kind" com.docker.compose.project "$compose")
+    fi
+    for cid in $ids; do
+      case "$cid" in
+        ''|*[!A-Za-z0-9_.-]*)
+          echo "REFUSED: Docker returned an unsafe $kind id for $owner: $cid" >&2
+          return 1
+          ;;
+      esac
+      labels=$(docker inspect --format '{{ index .Config.Labels "com.firstmate.owner" }}	{{ index .Config.Labels "com.firstmate.task" }}	{{ index .Config.Labels "com.docker.compose.project" }}' "$cid" 2>/dev/null) || {
+        echo "error: cannot inspect Docker $kind $cid; preserving it" >&2
+        return 1
+      }
+      IFS=$'\t' read -r actual_owner actual_task actual_project <<EOF
+$labels
+EOF
+      [ "$actual_owner" != '<no value>' ] || actual_owner=
+      [ "$actual_task" != '<no value>' ] || actual_task=
+      [ "$actual_project" != '<no value>' ] || actual_project=
+      if [ "$actual_owner" != "$owner" ] && [ "$actual_project" != "$compose" ]; then
+        echo "REFUSED: Docker $kind $cid matched an unsafe label query; preserving it" >&2
+        return 1
+      fi
+      [ -z "$actual_task" ] || [ "$actual_task" = "$task" ] || {
+        echo "REFUSED: Docker $kind $cid has a mismatched task label; preserving it" >&2
+        return 1
+      }
+      case "$kind" in
+        volume) docker volume rm "$cid" >/dev/null 2>&1 ;;
+        network) docker network rm "$cid" >/dev/null 2>&1 ;;
+      esac || {
+        echo "error: failed to remove Docker $kind $cid; preserving it" >&2
+        return 1
+      }
+      if docker inspect "$cid" >/dev/null 2>&1; then
+        echo "error: Docker $kind $cid still exists after removal; preserving metadata" >&2
+        return 1
+      fi
+      echo "resource: removed Docker $kind $cid for $owner"
+    done
+  done
+}
+
 fm_resource_chrome_cleanup() {  # <owner> <tasktmp> <session> <profile> <owned> <used>
   local owner=$1 tasktmp=$2 session=$3 profile=$4 owned=${5:-0} used=${6:-0}
   local marker marker_owner chrome
   [ "$owned" = 1 ] || return 0
   marker="$profile/$FM_RESOURCE_OWNER_MARKER"
+  if [ -e "$marker" ] && { [ ! -f "$marker" ] || [ -L "$marker" ]; }; then
+    echo "REFUSED: Chrome profile owner marker is not a regular file: $marker" >&2
+    return 1
+  fi
   marker_owner=$(fm_resource_marker_get "$marker" owner)
   [ "$marker_owner" = "$owner" ] || {
     [ -e "$profile" ] || return 0
@@ -354,8 +436,20 @@ fm_resource_chrome_cleanup() {  # <owner> <tasktmp> <session> <profile> <owned> 
 fm_resource_cleanup_task() {  # <id> <home> <root> <state> <tasktmp> [<manifest>]
   local id=$1 home=$2 root=$3 state=$4 tasktmp=${5:-} manifest=${6:-}
   local expected_owner owner manifest_tmp manifest_home manifest_root backend endpoint compose chrome_session profile chrome_owned docker_used chrome_used
-  local resource_home resource_root
-  manifest=${manifest:-$state/$id$FM_RESOURCE_MANIFEST_SUFFIX}
+  local resource_home resource_root state_abs expected_manifest manifest_dir manifest_base
+  state_abs=$(fm_resource_real_dir "$state") || return 1
+  expected_manifest="$state_abs/$id$FM_RESOURCE_MANIFEST_SUFFIX"
+  if [ -n "$manifest" ]; then
+    manifest_base=$(basename "$manifest")
+    manifest_dir=$(fm_resource_real_dir "$(dirname "$manifest")") || return 1
+    manifest="$manifest_dir/$manifest_base"
+    [ "$manifest" = "$expected_manifest" ] || {
+      echo "REFUSED: resource manifest path is outside the task state directory" >&2
+      return 1
+    }
+  else
+    manifest=$expected_manifest
+  fi
   if [ -f "$manifest" ]; then
     owner=$(fm_resource_manifest_get "$manifest" owner)
     manifest_home=$(fm_resource_manifest_get "$manifest" home)
@@ -396,6 +490,7 @@ fm_resource_cleanup_task() {  # <id> <home> <root> <state> <tasktmp> [<manifest>
     compose=$(fm_resource_compose_project_for "$home" "$root" "$id") || return 1
   fi
   fm_resource_docker_cleanup "$owner" "$id" "$compose" "$docker_used" || return 1
+  fm_resource_docker_cleanup_noncontainers "$owner" "$id" "$compose" "$docker_used" || return 1
   if [ -n "$profile" ] && [ -n "$chrome_session" ]; then
     fm_resource_chrome_cleanup "$owner" "$tasktmp" "$chrome_session" "$profile" "$chrome_owned" "$chrome_used" || return 1
   fi
