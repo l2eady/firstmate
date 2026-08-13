@@ -75,9 +75,11 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
-#   Reusing an existing task id currently allocates a fresh worktree instead of adopting the
-#   old one, so commit live WIP before changing harness, model, or effort or relaunching; the
-#   worktree-adoption follow-up is tracked as fm-spawn-worktree-identity-z11.
+#   Reusing an existing task id adopts the recorded worktree before any fresh treehouse
+#   acquisition. The recorded backend endpoint and every matching task meta are checked first;
+#   a live or ambiguous agent holder refuses the spawn, while a missing recorded worktree warns
+#   that WIP or a checked-out branch may remain before requesting a fresh treehouse worktree.
+#   No branch is detached automatically when the recorded worktree is missing or unavailable.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
@@ -213,6 +215,15 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+SPAWN_LOCK=
+
+release_spawn_lock() {
+  local lock=$SPAWN_LOCK
+  [ -n "$lock" ] || return 0
+  rm -f "$lock/pid" 2>/dev/null || true
+  rmdir "$lock" 2>/dev/null || true
+  SPAWN_LOCK=
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -233,6 +244,7 @@ parse_orca_worktree_result() {
 
 orca_spawn_abort_cleanup() {
   local status=$?
+  release_spawn_lock
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
@@ -328,6 +340,52 @@ else
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+
+acquire_spawn_lock() {
+  local lock=$1 old_pid
+  mkdir -p "$STATE"
+  if mkdir "$lock" 2>/dev/null; then
+    SPAWN_LOCK=$lock
+    printf '%s\n' "$$" > "$SPAWN_LOCK/pid" || {
+      release_spawn_lock
+      echo "error: could not record the spawn lock for task $ID; refusing to launch" >&2
+      return 1
+    }
+    return 0
+  fi
+  old_pid=$(cat "$lock/pid" 2>/dev/null || true)
+  case "$old_pid" in
+    ''|*[!0-9]*)
+      echo "error: spawn lock for task $ID exists without a verifiable owner; refusing to launch" >&2
+      return 1
+      ;;
+  esac
+  if kill -0 "$old_pid" 2>/dev/null; then
+    echo "error: another spawn for task $ID is in progress (pid $old_pid); refusing to launch" >&2
+    return 1
+  fi
+  rm -f "$lock/pid" 2>/dev/null || {
+    echo "error: stale spawn lock for task $ID could not be cleared; refusing to launch" >&2
+    return 1
+  }
+  rmdir "$lock" 2>/dev/null || {
+    echo "error: spawn lock for task $ID is not safely removable; refusing to launch" >&2
+    return 1
+  }
+  if ! mkdir "$lock" 2>/dev/null; then
+    echo "error: another spawn claimed task $ID while its stale lock was cleared; refusing to launch" >&2
+    return 1
+  fi
+  SPAWN_LOCK=$lock
+  printf '%s\n' "$$" > "$SPAWN_LOCK/pid" || {
+    release_spawn_lock
+    echo "error: could not record the spawn lock for task $ID; refusing to launch" >&2
+    return 1
+  }
+}
+
+[ -n "$ID" ] || { echo "error: missing task id" >&2; exit 2; }
+acquire_spawn_lock "$STATE/$ID.spawn.lock" || exit 1
 
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
@@ -799,6 +857,102 @@ treehouse_project_worktree_root_real() {  # <path>
   printf '%s\n' "$root_real"
 }
 
+worktree_root_real() {  # <path>
+  local path=$1 top
+  top=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null) || return 1
+  (cd "$top" 2>/dev/null && pwd -P)
+}
+
+check_worktree_meta_holder() {  # <meta-file> <canonical-worktree>
+  local meta=$1 candidate=$2 holder_id holder_wt holder_real backend target state
+  holder_id=$(basename "$meta" .meta)
+  holder_wt=$(fm_meta_get "$meta" worktree)
+  [ -n "$holder_wt" ] || return 0
+  holder_real=$(worktree_root_real "$holder_wt" 2>/dev/null || true)
+  [ "$holder_real" = "$candidate" ] || return 0
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  if [ -z "$target" ]; then
+    echo "error: worktree $candidate is recorded by task $holder_id, but its backend endpoint is missing; refusing to take it over" >&2
+    return 1
+  fi
+  if ! fm_backend_validate "$backend" >/dev/null 2>&1; then
+    echo "error: cannot verify the backend endpoint for task $holder_id (backend=$backend target=$target); refusing to take over worktree $candidate" >&2
+    return 1
+  fi
+  state=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf 'unknown')
+  # A backend may not have an agent classifier yet, but a definitively gone
+  # endpoint is safe to treat as stale; an existing or unreadable endpoint stays
+  # fail-closed so an uncertain probe can never duplicate a live agent.
+  if [ "$state" = unknown ] \
+    && ! fm_backend_target_exists "$backend" "$target" "fm-$holder_id" >/dev/null 2>&1; then
+    state=dead
+  fi
+  case "$state" in
+    dead)
+      echo "warning: task $holder_id still records worktree $candidate, but its $backend endpoint $target has no agent; treating that metadata as stale" >&2
+      ;;
+    alive)
+      echo "error: worktree $candidate is held by agent task $holder_id (backend=$backend target=$target); refusing to take it over" >&2
+      return 1
+      ;;
+    *)
+      echo "error: cannot confirm that task $holder_id has released worktree $candidate (backend=$backend target=$target reported $state); refusing to take it over" >&2
+      return 1
+      ;;
+  esac
+}
+
+adopt_recorded_worktree() {
+  local recorded_project recorded_project_real validated provider holder_meta
+  RECORDED_META="$STATE/$ID.meta"
+  RECORDED_WORKTREE=$(fm_meta_get "$RECORDED_META" worktree)
+  provider=treehouse
+  [ "$BACKEND" = orca ] && provider=orca
+  if [ -z "$RECORDED_WORKTREE" ]; then
+    echo "warning: task $ID has metadata but no recorded worktree; requesting a fresh $provider worktree; no recorded path is available to inspect for uncommitted work" >&2
+    return 0
+  fi
+  if [ ! -d "$RECORDED_WORKTREE" ]; then
+    echo "warning: recorded worktree for task $ID is gone ($RECORDED_WORKTREE); requesting a fresh $provider worktree; uncommitted work may still remain there and a task branch may still be checked out elsewhere; firstmate will not detach it automatically" >&2
+    return 0
+  fi
+  RECORDED_WORKTREE_ROOT=$(worktree_root_real "$RECORDED_WORKTREE" 2>/dev/null || true)
+  if [ -z "$RECORDED_WORKTREE_ROOT" ]; then
+    echo "error: recorded worktree for task $ID still exists at $RECORDED_WORKTREE but is not a Git worktree; refusing to allocate another worktree" >&2
+    return 1
+  fi
+  if [ "$RECORDED_WORKTREE_ROOT" = "$PROJ_ABS_REAL" ]; then
+    echo "error: recorded worktree for task $ID resolves to the primary project checkout $PROJ_ABS_REAL; refusing to launch" >&2
+    return 1
+  fi
+  recorded_project=$(fm_meta_get "$RECORDED_META" project)
+  if [ -n "$recorded_project" ] && [ -d "$recorded_project" ]; then
+    recorded_project_real=$(cd "$recorded_project" 2>/dev/null && pwd -P || true)
+    if [ -n "$recorded_project_real" ] && [ "$recorded_project_real" != "$PROJ_ABS_REAL" ]; then
+      echo "error: task $ID metadata belongs to project $recorded_project_real, not requested project $PROJ_ABS_REAL; refusing to reuse its worktree" >&2
+      return 1
+    fi
+  fi
+  WT="$RECORDED_WORKTREE_ROOT"
+  if [ "$BACKEND" = orca ]; then
+    validate_spawn_worktree "recorded task metadata" "$ID"
+  else
+    validated=$(treehouse_project_worktree_root_real "$WT" || true)
+    if [ -z "$validated" ]; then
+      echo "error: recorded worktree for task $ID is not an isolated worktree of the requested project ($WT); refusing to allocate another worktree" >&2
+      return 1
+    fi
+    WT=$validated
+  fi
+  for holder_meta in "$STATE"/*.meta; do
+    [ -e "$holder_meta" ] || continue
+    check_worktree_meta_holder "$holder_meta" "$WT" || return 1
+  done
+  REUSE_RECORDED_WORKTREE=1
+  echo "reusing recorded worktree for task $ID: $WT" >&2
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -829,7 +983,17 @@ validate_treehouse_project_worktree() {  # <source> <inspect-target>
   exit 1
 }
 
+REUSE_RECORDED_WORKTREE=0
+RECORDED_META=
+RECORDED_WORKTREE=
+RECORDED_WORKTREE_ROOT=
+if [ "$KIND" != secondmate ] && [ -f "$STATE/$ID.meta" ]; then
+  adopt_recorded_worktree || exit 1
+fi
+
 W="fm-$ID"
+SPAWN_CWD=$PROJ_ABS
+[ "$REUSE_RECORDED_WORKTREE" -eq 1 ] && SPAWN_CWD=$WT
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
@@ -840,7 +1004,7 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_CWD") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -870,7 +1034,7 @@ case "$BACKEND" in
     HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -882,7 +1046,7 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$SPAWN_CWD") || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -894,7 +1058,7 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$SPAWN_CWD") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -905,25 +1069,35 @@ EOF
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
   orca)
-    set +e
-    ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
-    ORCA_WT_STATUS=$?
-    set -e
-    if [ "$ORCA_WT_STATUS" -ne 0 ]; then
-      if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
-        if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
-          ORCA_ABORT_CLEANUP=1
+    if [ "$REUSE_RECORDED_WORKTREE" -eq 1 ]; then
+      ORCA_WORKTREE_ID=$(fm_meta_get "$RECORDED_META" orca_worktree_id)
+      [ -n "$ORCA_WORKTREE_ID" ] || {
+        echo "error: task $ID has a recorded Orca worktree path but no Orca worktree id; refusing to allocate another worktree" >&2
+        exit 1
+      }
+      ORCA_ABORT_CLEANUP=0
+      validate_spawn_worktree "recorded task metadata" "$W"
+    else
+      set +e
+      ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
+      ORCA_WT_STATUS=$?
+      set -e
+      if [ "$ORCA_WT_STATUS" -ne 0 ]; then
+        if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
+          if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
+            ORCA_ABORT_CLEANUP=1
+          fi
         fi
+        exit 1
       fi
-      exit 1
+      parse_orca_worktree_result "$ORCA_WT_RAW" || true
+      ORCA_ABORT_CLEANUP=1
     fi
-    parse_orca_worktree_result "$ORCA_WT_RAW" || true
-    ORCA_ABORT_CLEANUP=1
     if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
       echo "error: orca did not return a worktree id/path for $W" >&2
       exit 1
     fi
-    validate_spawn_worktree "orca worktree create" "$W"
+    [ "$REUSE_RECORDED_WORKTREE" -eq 1 ] || validate_spawn_worktree "orca worktree create" "$W"
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -971,7 +1145,7 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$REUSE_RECORDED_WORKTREE" -eq 0 ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to a

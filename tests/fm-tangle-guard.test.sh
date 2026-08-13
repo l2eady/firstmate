@@ -134,6 +134,10 @@ test_brief_assertion_precedes_branch() {
     "brief is missing the isolation blocked-status contract"
   assert_grep "The path check is authoritative" "$brief" \
     "brief must make the path check authoritative"
+  assert_grep "git branch --show-current" "$brief" \
+    "brief must recognize a respawned worktree already on the task branch"
+  assert_grep "git checkout fm/" "$brief" \
+    "brief must resume an existing task branch without detaching another worktree"
   assert_no_grep "A reliable test that you are in a linked worktree" "$brief" \
     "brief must not present git-dir/common-dir as decisive"
   assert_no_grep "they are identical in the primary checkout" "$brief" \
@@ -144,7 +148,7 @@ test_brief_assertion_precedes_branch() {
     fail "brief missing assertion ($iso) or branch step ($br)"
   fi
   [ "$iso" -lt "$br" ] || fail "isolation assertion (line $iso) must precede the branch step (line $br)"
-  pass "fm-brief: ship brief asserts worktree isolation before the branch step"
+  pass "fm-brief: ship brief asserts isolation before an idempotent branch setup"
 }
 
 # --- GUARD 1b: fm-spawn isolation abort -------------------------------------
@@ -405,6 +409,229 @@ run_spawn_record() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
 }
 
+# The identity fixture can report a dead or live agent for one recorded target
+# and records the backend commands so adoption can be distinguished from a fresh
+# treehouse acquisition.
+make_spawn_identity_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
+target=
+previous=
+for arg in "$@"; do
+  if [ "$previous" = -t ]; then
+    target=$arg
+    previous=
+  else
+    previous=$arg
+  fi
+done
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*)
+    if [ -n "${FM_FAKE_ENDPOINT_GONE_TARGET:-}" ] && [ "$target" = "$FM_FAKE_ENDPOINT_GONE_TARGET" ]; then
+      exit 1
+    fi
+    if [ -n "${FM_FAKE_AGENT_TARGET:-}" ] && [ "$target" = "$FM_FAKE_AGENT_TARGET" ]; then
+      printf '%s\n' "${FM_FAKE_AGENT_COMMAND:-bash}"
+    else
+      printf 'bash\n'
+    fi
+    exit 0
+    ;;
+esac
+case "${1:-}" in
+  display-message)
+    if [ -n "${FM_FAKE_ENDPOINT_GONE_TARGET:-}" ] && ! grep -q 'new-window' "$FM_TMUX_REC"; then
+      case "$*" in
+        *"$FM_FAKE_ENDPOINT_GONE_TARGET"*) exit 1 ;;
+      esac
+    fi
+    printf 'firstmate\n'
+    exit 0
+    ;;
+  new-window) printf '@spawnwid\n'; exit 0 ;;
+  list-windows|has-session|new-session|send-keys|set-window-option) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse sleep
+  printf '%s\n' "$fakebin"
+}
+
+run_spawn_identity() {
+  local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 rec=$6 agent_target=$7 agent_command=$8
+  mkdir -p "$home/data/$id"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" \
+    FM_FAKE_AGENT_TARGET="$agent_target" FM_FAKE_AGENT_COMMAND="$agent_command" \
+    FM_FAKE_ENDPOINT_GONE_TARGET="${FM_FAKE_ENDPOINT_GONE_TARGET:-}" \
+    FM_TMUX_REC="$rec" TMUX="fake,1,0" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
+}
+
+write_spawn_meta() {
+  local home=$1 id=$2 proj=$3 wt=$4 window=$5
+  mkdir -p "$home/state"
+  {
+    printf 'window=%s\n' "$window"
+    printf 'worktree=%s\n' "$wt"
+    printf 'project=%s\n' "$proj"
+    printf 'kind=ship\n'
+  } > "$home/state/$id.meta"
+}
+
+test_spawn_reuses_recorded_worktree() {
+  local home proj wt1 wt2 wt1_real fakebin rec first second first_status second_status gets
+  home="$TMP_ROOT/spawn-identity-reuse-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-identity-reuse-proj")
+  wt1="$TMP_ROOT/spawn-identity-reuse-wt1"
+  wt2="$TMP_ROOT/spawn-identity-reuse-wt2"
+  git -C "$proj" worktree add -q --detach "$wt1" >/dev/null 2>&1
+  git -C "$proj" worktree add -q --detach "$wt2" >/dev/null 2>&1
+  wt1_real=$(cd "$wt1" && pwd -P)
+  fakebin=$(make_spawn_identity_fakebin "$TMP_ROOT/spawn-identity-reuse-fake")
+  rec="$TMP_ROOT/spawn-identity-reuse.tmux"
+  : > "$rec"
+
+  first=$(run_spawn_identity "$home" reuse-identity-aa1 "$proj" "$wt1" "$fakebin" "$rec" '' bash); first_status=$?
+  expect_code 0 "$first_status" "initial identity fixture spawn should succeed"
+  assert_contains "$first" "spawned reuse-identity-aa1" "initial identity fixture spawn did not create task metadata"
+  second=$(run_spawn_identity "$home" reuse-identity-aa1 "$proj" "$wt2" "$fakebin" "$rec" '' bash); second_status=$?
+  expect_code 0 "$second_status" "same-id respawn should reuse the recorded worktree"
+  assert_contains "$second" "reusing recorded worktree for task reuse-identity-aa1" "same-id respawn did not report recorded-worktree adoption"
+  assert_contains "$second" "worktree=$wt1_real" "same-id respawn did not return the original worktree"
+  assert_grep 'new-window' "$rec" "same-id respawn did not create its new pane"
+  assert_grep "-c $wt1_real" "$rec" "same-id respawn did not create its new pane in the recorded worktree"
+  gets=$(grep -c 'treehouse get' "$rec" || true)
+  [ "$gets" = 1 ] || fail "same-id respawn called treehouse get $gets times instead of only on the initial spawn"
+  assert_absent "$home/state/reuse-identity-aa1.spawn.lock" "spawn lock was not released after same-id adoption"
+  pass "fm-spawn: reuses the recorded worktree and skips a second treehouse acquisition"
+}
+
+test_spawn_reuses_after_recorded_endpoint_gone() {
+  local home proj wt wt_real fakebin rec out rc target
+  home="$TMP_ROOT/spawn-identity-gone-endpoint-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-identity-gone-endpoint-proj")
+  wt="$TMP_ROOT/spawn-identity-gone-endpoint-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  wt_real=$(cd "$wt" && pwd -P)
+  target="firstmate:fm-gone-identity-ab2"
+  write_spawn_meta "$home" gone-identity-ab2 "$proj" "$wt" "$target"
+  fakebin=$(make_spawn_identity_fakebin "$TMP_ROOT/spawn-identity-gone-endpoint-fake")
+  rec="$TMP_ROOT/spawn-identity-gone-endpoint.tmux"
+  : > "$rec"
+
+  set +e
+  out=$(FM_FAKE_ENDPOINT_GONE_TARGET="$target" run_spawn_identity "$home" gone-identity-ab2 "$proj" "$TMP_ROOT/unused" "$fakebin" "$rec" '' bash)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "spawn should reuse a worktree after its old endpoint is gone"
+  assert_contains "$out" "worktree=$wt_real" "gone-endpoint respawn did not keep the recorded worktree"
+  assert_no_grep 'treehouse get' "$rec" "gone-endpoint respawn should not acquire a fresh treehouse worktree"
+  pass "fm-spawn: reuses the recorded worktree after the old pane is gone"
+}
+
+test_spawn_refuses_live_recorded_holder() {
+  local home proj wt fakebin rec out rc target
+  home="$TMP_ROOT/spawn-identity-live-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-identity-live-proj")
+  wt="$TMP_ROOT/spawn-identity-live-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  target="firstmate:fm-live-identity-bb2"
+  write_spawn_meta "$home" live-identity-bb2 "$proj" "$wt" "$target"
+  fakebin=$(make_spawn_identity_fakebin "$TMP_ROOT/spawn-identity-live-fake")
+  rec="$TMP_ROOT/spawn-identity-live.tmux"
+  : > "$rec"
+
+  set +e
+  out=$(run_spawn_identity "$home" live-identity-bb2 "$proj" "$TMP_ROOT/unused" "$fakebin" "$rec" "$target" codex)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "spawn should refuse a live recorded holder"
+  assert_contains "$out" "held by agent task live-identity-bb2" "live-holder refusal did not identify the task holding the worktree"
+  assert_no_grep 'new-window' "$rec" "live-holder refusal allocated a backend endpoint"
+  assert_absent "$home/state/live-identity-bb2.spawn.lock" "spawn lock was not released after live-holder refusal"
+  pass "fm-spawn: refuses to take over a worktree held by a live recorded agent"
+}
+
+test_spawn_refuses_other_task_holder() {
+  local home proj wt fakebin rec out rc holder_target
+  home="$TMP_ROOT/spawn-identity-other-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-identity-other-proj")
+  wt="$TMP_ROOT/spawn-identity-other-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  write_spawn_meta "$home" adopt-identity-cc3 "$proj" "$wt" "firstmate:fm-adopt-identity-cc3"
+  holder_target="firstmate:fm-other-identity-dd4"
+  write_spawn_meta "$home" other-identity-dd4 "$proj" "$wt" "$holder_target"
+  fakebin=$(make_spawn_identity_fakebin "$TMP_ROOT/spawn-identity-other-fake")
+  rec="$TMP_ROOT/spawn-identity-other.tmux"
+  : > "$rec"
+
+  set +e
+  out=$(run_spawn_identity "$home" adopt-identity-cc3 "$proj" "$TMP_ROOT/unused" "$fakebin" "$rec" "$holder_target" codex)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "spawn should refuse another task's live holder"
+  assert_contains "$out" "held by agent task other-identity-dd4" "other-holder refusal did not identify the other task"
+  assert_no_grep 'new-window' "$rec" "other-holder refusal allocated a backend endpoint"
+  pass "fm-spawn: refuses to take over a worktree recorded as held by another live task"
+}
+
+test_spawn_refuses_concurrent_same_id() {
+  local home proj fakebin rec out rc id
+  home="$TMP_ROOT/spawn-identity-lock-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-identity-lock-proj")
+  fakebin=$(make_spawn_identity_fakebin "$TMP_ROOT/spawn-identity-lock-fake")
+  rec="$TMP_ROOT/spawn-identity-lock.tmux"
+  : > "$rec"
+  id=lock-identity-ff4
+  mkdir -p "$home/state/$id.spawn.lock"
+  printf '%s\n' "$$" > "$home/state/$id.spawn.lock/pid"
+
+  set +e
+  out=$(run_spawn_identity "$home" "$id" "$proj" "$TMP_ROOT/unused" "$fakebin" "$rec" '' bash)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "concurrent same-id spawn should be refused"
+  assert_contains "$out" "another spawn for task $id is in progress" "concurrent same-id refusal did not identify the active spawn"
+  assert_no_grep 'new-window' "$rec" "concurrent same-id refusal allocated a backend endpoint"
+  pass "fm-spawn: serializes concurrent respawns of the same task id"
+}
+
+test_spawn_warns_before_fresh_worktree_after_loss() {
+  local home proj wt fakebin rec out rc
+  home="$TMP_ROOT/spawn-identity-missing-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-identity-missing-proj")
+  wt="$TMP_ROOT/spawn-identity-missing-new-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  write_spawn_meta "$home" missing-identity-ee5 "$proj" "$TMP_ROOT/spawn-identity-missing-gone" "firstmate:fm-missing-identity-ee5"
+  fakebin=$(make_spawn_identity_fakebin "$TMP_ROOT/spawn-identity-missing-fake")
+  rec="$TMP_ROOT/spawn-identity-missing.tmux"
+  : > "$rec"
+
+  out=$(run_spawn_identity "$home" missing-identity-ee5 "$proj" "$wt" "$fakebin" "$rec" '' bash); rc=$?
+  expect_code 0 "$rc" "spawn should request a fresh worktree when the recorded path is gone"
+  assert_contains "$out" "requesting a fresh treehouse worktree" "missing-worktree fallback did not report the fresh acquisition"
+  assert_contains "$out" "uncommitted work may still remain" "missing-worktree fallback did not warn about possible WIP"
+  assert_contains "$out" "will not detach it automatically" "missing-worktree fallback did not promise branch safety"
+  assert_grep 'treehouse get' "$rec" "missing-worktree fallback did not acquire through treehouse"
+  pass "fm-spawn: warns about stranded WIP before requesting a fresh treehouse worktree"
+}
+
 test_spawn_tmux_window_construction() {
   local home proj fakebin rec wt out status
   home="$TMP_ROOT/spawn-rec-home"
@@ -450,3 +677,9 @@ test_spawn_fails_fast_on_non_git_project
 test_spawn_ignores_transient_unrelated_paths
 test_spawn_isolation_abort
 test_spawn_tmux_window_construction
+test_spawn_reuses_recorded_worktree
+test_spawn_reuses_after_recorded_endpoint_gone
+test_spawn_refuses_live_recorded_holder
+test_spawn_refuses_other_task_holder
+test_spawn_refuses_concurrent_same_id
+test_spawn_warns_before_fresh_worktree_after_loss
