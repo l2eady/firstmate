@@ -77,17 +77,17 @@ When changing any primary watcher adapter, update `docs/supervision-protocols/`,
 
 `bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.
 Do not make the shell scripts parse or match natural-language dispatch rules.
-The supported launch-profile flags below were verified locally on 2026-06-30 with each CLI's help and parser path.
+The supported launch-profile flags below were verified locally on 2026-08-13 with each installed CLI's help and parser path where the binary was available.
 
 | Harness | Model flag | Effort flag | Notes |
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
-| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
-| grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Verified on grok 0.2.73. `--effort` parses too, but firstmate's profile axis is reasoning effort. `--reasoning-effort max` is rejected, so `max` is omitted. |
-| pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
+| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'` | Verified on 2026-08-13 with codex-cli 0.147.0. `codex debug models` reports max for gpt-5.6-sol, gpt-5.6-sol-wm, gpt-5.6-terra, gpt-5.6-luna, and codex-auto-review. `ultra` is deliberately omitted because the catalog describes it as automatic task delegation, which is outside firstmate's supervised lifecycle. |
+| grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Recheck attempted on 2026-08-13, but `command -v grok` and `grok --version` both reported command not found. The prior verified grok 0.2.73 result rejected `--reasoning-effort max`, so `max` remains omitted pending an installed CLI. |
+| pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified on 2026-08-13 with pi 0.83.0. `pi --help` lists max, the non-interactive parser path reached model setup with max, and ultra prints an invalid-thinking warning. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 
-When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
+When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta, emits a warning on stderr, and omits the effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
 
 ## no-mistakes skill invocation

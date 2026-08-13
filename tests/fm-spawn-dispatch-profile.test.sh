@@ -240,7 +240,7 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_omits_invalid_max_effort() {
+test_codex_threads_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
   rec=$(make_spawn_case profile-codex-max codex "$id")
@@ -248,13 +248,29 @@ test_codex_omits_invalid_max_effort() {
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
   status=$?
-  expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
+  expect_code 0 "$status" "codex spawn with supported max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
-  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
-  pass "codex omits unsupported max effort instead of passing a bad config value"
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread supported max reasoning effort"
+  assert_not_contains "$out" "unsupported; omitting effort flag" "codex max should not emit an unsupported-effort warning"
+  pass "codex threads supported max effort"
+}
+
+test_codex_rejects_ultra_explicitly() {
+  local rec id out status launch
+  id=profile-codex-ultra-z4
+  rec=$(make_spawn_case profile-codex-ultra codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort ultra)
+  status=$?
+  expect_code 1 "$status" "codex spawn with unsupported ultra effort should fail clearly"
+  assert_contains "$out" "error: --effort must be one of low, medium, high, xhigh, max" \
+    "codex ultra rejection must explain the accepted firstmate effort axis"
+  launch=$(cat "$LAUNCH_LOG")
+  [ -z "$launch" ] || fail "codex ultra rejection must not launch a pane"
+  pass "codex rejects unsupported ultra effort with an explicit error"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -289,6 +305,8 @@ test_grok_omits_invalid_max_reasoning_effort() {
     "grok launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
+  assert_contains "$out" "warning: grok effort max is unsupported; omitting effort flag" \
+    "grok launch must warn when max is omitted"
   pass "grok omits unsupported max reasoning effort"
 }
 
@@ -308,10 +326,12 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
+  assert_contains "$out" "warning: opencode effort high is unsupported; omitting effort flag" \
+    "opencode launch must warn when the effort axis is omitted"
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
-test_pi_omits_invalid_max_effort() {
+test_pi_threads_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
   rec=$(make_spawn_case profile-pi pi "$id")
@@ -319,12 +339,12 @@ test_pi_omits_invalid_max_effort() {
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet --effort max)
   status=$?
-  expect_code 0 "$status" "pi spawn with max effort should not pass an invalid flag"
+  expect_code 0 "$status" "pi spawn with supported max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi sonnet max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "pi --model 'sonnet' -e" "pi launch did not thread model"
-  assert_not_contains "$launch" "--thinking" "pi launch must omit --thinking max because the CLI rejects it"
-  pass "pi threads model and omits unsupported max effort"
+  assert_contains "$launch" "pi --model 'sonnet' --thinking 'max' -e" "pi launch did not thread model and max thinking"
+  assert_not_contains "$out" "unsupported; omitting effort flag" "pi max should not emit an unsupported-effort warning"
+  pass "pi threads supported max effort"
 }
 
 test_batch_forwards_shared_profile_flags() {
@@ -372,11 +392,12 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_omits_invalid_max_effort
+test_codex_threads_max_effort
+test_codex_rejects_ultra_explicitly
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
-test_pi_omits_invalid_max_effort
+test_pi_threads_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

@@ -436,6 +436,11 @@ model_flag_for_harness() {
   esac
 }
 
+warn_unsupported_effort() {
+  local harness=$1 effort=$2
+  printf 'warning: %s effort %s is unsupported; omitting effort flag\n' "$harness" "$effort" >&2
+}
+
 effort_flag_for_harness() {
   local harness=$1 effort=$2
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
@@ -443,34 +448,43 @@ effort_flag_for_harness() {
     claude)
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+        *) warn_unsupported_effort "$harness" "$effort" ;;
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # Verified 2026-08-13 with codex-cli 0.147.0 using `codex --version`.
+      # `codex debug models` reported low,medium,high,xhigh,max,ultra for gpt-5.6-sol.
+      # It reported low,medium,high,xhigh,max for gpt-5.6-luna.
+      # Firstmate passes max because it is maximum reasoning without delegation.
+      # Firstmate omits ultra because Codex defines it as automatic task delegation,
+      # which would bypass firstmate's supervised crewmate lifecycle.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        *) warn_unsupported_effort "$harness" "$effort" ;;
       esac
       ;;
     grok)
-      # grok exposes both --effort and --reasoning-effort; firstmate's profile
-      # axis is the reasoning knob, and --reasoning-effort rejects max, so pass
-      # only its accepted shared vocabulary subset.
+      # Recheck attempted 2026-08-13: `command -v grok` and `grok --version`
+      # both reported command not found, so retain the prior verified 0.2.73 gate.
+      # Grok's profile axis is reasoning effort, and prior verification rejected max.
       case "$effort" in
         low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+        *) warn_unsupported_effort "$harness" "$effort" ;;
       esac
       ;;
     pi)
-      # pi accepts --thinking low|medium|high|xhigh. It warns and ignores max, so
-      # omit max rather than passing a flag the installed CLI will reject as invalid.
+      # Verified 2026-08-13 with pi 0.83.0 using `pi --version` and `pi --help`.
+      # `pi --thinking max --offline --no-session --no-tools -p ...` reached model setup
+      # and returned only the expected missing-API-key error, while ultra was rejected.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+        *) warn_unsupported_effort "$harness" "$effort" ;;
       esac
       ;;
-    # opencode's interactive `opencode --prompt` launch has a verified --model
-    # flag but no verified effort flag. Its `opencode run --variant` flag belongs
-    # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    opencode)
+      # opencode's interactive `opencode --prompt` launch has no verified effort flag.
+      warn_unsupported_effort "$harness" "$effort"
+      ;;
   esac
 }
 
