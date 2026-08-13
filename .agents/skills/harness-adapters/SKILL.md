@@ -83,13 +83,12 @@ Re-verify a row against the installed CLI and re-date only that row when you cha
 | Harness | Model flag | Effort flag | Notes |
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on 2026-06-30 with Claude Code 2.1.196; not rechecked since. |
-| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'` | Verified on 2026-08-13 with codex-cli 0.147.0. `max` is a per-model capability, not a per-harness one: `codex debug models` advertises `supported_reasoning_levels` per model, and gpt-5.5 and older stop at `xhigh`. `fm-spawn` therefore queries the installed CLI for the effective model's levels rather than hard-coding a model list - the explicit `--model` when one was resolved, else the top-level `model` key in `$CODEX_HOME/config.toml` - and omits the flag with a warning when the catalog says that model lacks the requested level. `low`, `medium`, `high`, and `xhigh` are advertised by every catalog model, so they still pass when the catalog cannot be read; `max` is omitted with a warning whenever support cannot be confirmed, including when no model resolves, rather than reaching a launch that cannot honor it. `ultra` is never passed: the catalog describes it as maximum reasoning with automatic task delegation, which is outside firstmate's supervised crewmate lifecycle, and it is untested here. |
+| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'` | Verified on 2026-08-13 with codex-cli 0.147.0. `max` is per-model, not per-harness; `bin/fm-spawn.sh`'s header owns that gate contract. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Recheck attempted on 2026-08-13, but `command -v grok` and `grok --version` both reported command not found. The prior verified grok 0.2.73 result rejected `--reasoning-effort max`, so `max` remains omitted pending an installed CLI. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified on 2026-08-13 with pi 0.83.0. `pi --help` lists max, the non-interactive parser path reached model setup with max, and ultra prints an invalid-thinking warning. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on 2026-06-30 with opencode 1.17.6; not rechecked since. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 
-When a requested effort value is outside the accepted set for the harness or, for codex, for the selected model, `fm-spawn` records the requested `effort=` in meta, warns on stderr naming the harness, model, effort, and reason, and omits the effort flag.
-This preserves launch success instead of passing a known-bad value, and never drops an effort silently.
+`fm-spawn` always records the requested `effort=` in meta; when it cannot pass that effort to the harness it omits the flag and warns on stderr, per the resolution contract in `bin/fm-spawn.sh`'s header (`bin/fm-spawn.sh --help`).
 
 ## no-mistakes skill invocation
 

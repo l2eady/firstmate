@@ -42,28 +42,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  # Stand in for the real `codex debug models` JSON catalog contract that
-  # fm-spawn queries for per-model supported_reasoning_levels. The shape mirrors
-  # codex-cli 0.147.0: gpt-5.6-luna advertises max, gpt-5.5 tops out at xhigh.
-  # Tests can rewrite or delete codex-models.json to drive a different catalog.
-  cat > "$fakebin/codex-models.json" <<'JSON'
-{"models":[
-  {"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}]},
-  {"slug":"gpt-5.5","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]}
-]}
-JSON
-  cat > "$fakebin/codex" <<'SH'
-#!/usr/bin/env bash
-set -u
-if [ "${1:-}" = debug ] && [ "${2:-}" = models ]; then
-  catalog="$(dirname "$0")/codex-models.json"
-  [ -f "$catalog" ] || { echo "catalog unavailable" >&2; exit 1; }
-  cat "$catalog"
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/codex"
+  fm_fake_codex_catalog "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -416,20 +395,28 @@ test_codex_omits_max_when_no_model_resolves() {
   pass "codex omits max when neither a flag nor its config resolves an effective model"
 }
 
-test_codex_rejects_ultra_explicitly() {
-  local rec id out status launch
-  id=profile-codex-ultra-z4
-  rec=$(make_spawn_case profile-codex-ultra codex "$id")
-  read_case_record "$rec"
+# `ultra` is rejected by the harness-agnostic --effort axis validator, not by any
+# codex-specific branch, so it never reaches effort_flag_for_harness at all. Cover
+# it across harnesses so the rejection is not misread as a codex-only gate.
+test_effort_axis_rejects_ultra_for_every_harness() {
+  local rec id out status launch harness n=0
+  for harness in codex claude pi; do
+    n=$((n + 1))
+    id="profile-ultra-$harness-z4"
+    rec=$(make_spawn_case "profile-ultra-$harness" "$harness" "$id")
+    read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort ultra)
-  status=$?
-  expect_code 1 "$status" "codex spawn with unsupported ultra effort should fail clearly"
-  assert_contains "$out" "error: --effort must be one of low, medium, high, xhigh, max" \
-    "codex ultra rejection must explain the accepted firstmate effort axis"
-  launch=$(cat "$LAUNCH_LOG")
-  [ -z "$launch" ] || fail "codex ultra rejection must not launch a pane"
-  pass "codex rejects unsupported ultra effort with an explicit error"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort ultra)
+    status=$?
+    expect_code 1 "$status" "$harness spawn with unsupported ultra effort should fail clearly"
+    assert_contains "$out" "error: --effort must be one of low, medium, high, xhigh, max" \
+      "$harness ultra rejection must explain the accepted firstmate effort axis"
+    assert_absent "$HOME_DIR/state/$id.meta" "$harness ultra refusal should happen before meta is written"
+    launch=$(cat "$LAUNCH_LOG")
+    [ -z "$launch" ] || fail "$harness ultra rejection must not launch a pane"
+  done
+  [ "$n" -eq 3 ] || fail "expected 3 harnesses exercised, got $n"
+  pass "the --effort axis validator rejects ultra for every harness before any launch"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -558,7 +545,7 @@ test_codex_keeps_xhigh_when_catalog_unreadable
 test_codex_resolves_default_model_from_codex_config_for_max
 test_codex_omits_max_for_configured_default_model_without_max
 test_codex_omits_max_when_no_model_resolves
-test_codex_rejects_ultra_explicitly
+test_effort_axis_rejects_ultra_for_every_harness
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis

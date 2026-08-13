@@ -7,8 +7,23 @@
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   installed CLIs were verified to support that axis; an omitted axis is never
+#   dropped silently - it warns on stderr naming the harness, model, effort, and
+#   reason. Per-harness effort flags and their dated CLI evidence are recorded in
+#   .agents/skills/harness-adapters/SKILL.md.
+#   codex effort is the one PER-MODEL axis, and this script owns that contract.
+#   `codex debug models` advertises supported_reasoning_levels per model, so the
+#   script resolves the EFFECTIVE model - the explicit --model when set, else the
+#   top-level `model` key in $CODEX_HOME/config.toml (default ~/.codex/config.toml);
+#   a `profile =` selection leaves it unresolved - and reads that model's advertised
+#   levels from the installed CLI rather than a hard-coded model list. low, medium,
+#   high, and xhigh are advertised by every catalog model, so they still pass when
+#   the catalog cannot be read. max is the level the catalog splits on, so it is
+#   passed only when the effective model advertises it, and is otherwise omitted
+#   with a warning - including when no effective model resolves - rather than
+#   reaching a launch that cannot honor it. ultra is never passed: codex defines it
+#   as maximum reasoning with automatic task delegation, which is outside
+#   firstmate's supervised crewmate lifecycle, and it is untested here.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
@@ -87,7 +102,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,93p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -442,12 +457,8 @@ warn_unsupported_effort() {
     "$harness" "$effort" "${model:-default}" "$reason" >&2
 }
 
-# The model a codex launch will actually run on: the explicit --model when
-# firstmate resolved one, else the model key codex itself reads from
-# $CODEX_HOME/config.toml (default ~/.codex/config.toml), the config source
-# `codex --help` documents. Only the top-level key counts, and a `profile =`
-# selection makes that key non-authoritative, so both cases print nothing and
-# the caller treats the effective model as unknown. Always succeeds.
+# Prints the effective codex model per this script's header contract, or nothing
+# when it does not resolve. Always succeeds; callers treat empty as unknown.
 codex_effective_model() {
   local model=$1 cfg
   if [ -n "$model" ] && [ "$model" != default ]; then
@@ -462,13 +473,10 @@ codex_effective_model() {
   return 0
 }
 
-# Codex reasoning levels are a per-model capability, not a per-harness one: the
-# 0.147.0 catalog advertises max on the gpt-5.6 line while gpt-5.5 and older stop
-# at xhigh. Read supported_reasoning_levels off the installed CLI rather than
-# hard-coding a model list that rots on every catalog release. Prints the given
-# model's comma-joined levels, or nothing when the catalog cannot be read (codex
-# or jq absent, command failure, model unknown or not listed). Always succeeds;
-# callers treat empty as unknown.
+# Prints the given model's comma-joined supported_reasoning_levels from the
+# installed CLI's catalog, or nothing when it cannot be read (codex or jq absent,
+# command failure, model unknown or not listed). Always succeeds; callers treat
+# empty as unknown, which this script's header contract defines the handling for.
 codex_model_reasoning_levels() {
   local model=$1 catalog
   [ -n "$model" ] || return 0
@@ -505,19 +513,8 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # Verified 2026-08-13 with codex-cli 0.147.0 using `codex --version`.
-      # max is accepted as a harness capability and then gated on the effective
-      # model's live supported_reasoning_levels, so a max-capable model gets the
-      # flag and a model that tops out at xhigh gets a warning instead. Every
-      # catalog model advertises low|medium|high|xhigh, so those stay fail-open
-      # when the catalog cannot be read; max is the level the catalog splits on,
-      # so it is omitted with a warning whenever support cannot be confirmed -
-      # including when no model is selected and codex's own config does not
-      # resolve one - rather than reaching a launch that cannot honor it.
-      # ultra stays unsupported on purpose: the catalog describes it as maximum
-      # reasoning with automatic task delegation, so it would hand work to a
-      # delegate outside firstmate's supervised crewmate lifecycle, there is no
-      # real firstmate use case for it, and it has never been tested.
+      # Verified 2026-08-13 with codex-cli 0.147.0. The per-model gate below,
+      # including why ultra is never passed, is specified in this script's header.
       case "$effort" in
         low|medium|high|xhigh|max)
           eff_model=$(codex_effective_model "$model") || eff_model=

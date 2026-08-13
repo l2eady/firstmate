@@ -91,6 +91,35 @@ SH
   done
 }
 
+# fm_fake_codex_catalog <fakebin> stands in for the real `codex debug models`
+# JSON catalog contract that fm-spawn queries for per-model
+# supported_reasoning_levels. The shape mirrors codex-cli 0.147.0: gpt-5.6-luna
+# advertises max, gpt-5.5 tops out at xhigh. Callers can rewrite or delete
+# <fakebin>/codex-models.json to drive a different catalog or an unreadable one.
+# Pin CODEX_HOME alongside it so the effective-model lookup never reads the
+# operator's real ~/.codex.
+fm_fake_codex_catalog() {
+  local fakebin=$1
+  cat > "$fakebin/codex-models.json" <<'JSON'
+{"models":[
+  {"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}]},
+  {"slug":"gpt-5.5","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]}
+]}
+JSON
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = debug ] && [ "${2:-}" = models ]; then
+  catalog="$(dirname "$0")/codex-models.json"
+  [ -f "$catalog" ] || { echo "catalog unavailable" >&2; exit 1; }
+  cat "$catalog"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/codex"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
