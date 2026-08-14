@@ -10,8 +10,10 @@ Each task gets a deterministic owner value of `firstmate:<home-tag>:<task-id>`.
 The home tag includes the resolved firstmate root hash and distinguishes secondmate homes.
 The manifest lives at `state/<task-id>.resources` and records the owner, task, home, root, backend endpoint, temporary root, Docker project, and browser profile.
 The task temporary root and browser profile each contain a regular-file `.fm-resource-owner` marker with the same owner and task id.
+If the conventional temporary-root name is occupied by another marker or unsafe path, spawn uses a home-scoped suffix and preserves the existing entry.
 The manifest and markers are written before the task endpoint receives its first command.
 The task environment exports the owner metadata and puts task-owned Docker and Chrome wrappers first in `PATH`.
+The wrappers derive the task identity from their installed task root and validate the durable manifest before forwarding a resource command.
 
 ## Docker resources
 
@@ -23,7 +25,7 @@ Resources with missing, malformed, or mismatched labels are preserved and leave 
 
 ## Chrome resources
 
-The task wrapper assigns a deterministic `CHROME_DEVTOOLS_AXI_SESSION` and task-owned user-data profile.
+The task wrapper assigns a deterministic `CHROME_DEVTOOLS_AXI_SESSION` as the browser ownership label and a task-owned user-data profile.
 The profile has the same regular-file owner marker as the task temporary root.
 Teardown stops the recorded session only when the task actually used the task-owned Chrome wrapper, then removes the verified profile.
 An explicitly supplied browser URL, auto-connect mode, or user-data directory disables browser ownership and prevents teardown from stopping that browser.
@@ -35,6 +37,7 @@ Cleanup failure preserves the manifest and reports an error, so a later run can 
 `bin/fm-resource-gc.sh --dry-run` lists manifests eligible for orphan cleanup without deleting anything.
 `bin/fm-resource-gc.sh` validates the manifest owner against the recorded home and root before it acts.
 The garbage collector requires a recorded backend endpoint and a confident dead-owner result from the backend liveness probe.
+After that proof, the collector removes the exact recorded backend endpoint before removing task-owned Docker, browser, profile, and temporary-root resources.
 Live and unknown owners are preserved, including when a backend cannot be queried reliably.
 The collector scans durable manifests rather than broad Docker, process, browser, or multiplexer patterns.
 No command removes a resource when firstmate cannot prove that the resource belongs to the task.
@@ -45,6 +48,6 @@ Backend endpoint teardown remains scoped to the exact target recorded in task me
 The no-mistakes CLI owns its existing CI step, but firstmate owns the current-state interpretation because no-mistakes is not the repository being changed here.
 When the CI log says that no checks were reported, `bin/fm-crew-state.sh` queries `gh-axi pr checks` for the recorded pull request.
 The first no-check result is rechecked after `FM_CI_NO_CHECKS_GRACE_SECS`, defaulting to three seconds, to avoid treating a transient GitHub outage as absent CI.
-Only two confirmed no-check results produce `no CI checks available`.
+Only two confirmed no-check results produce `state: no-ci` with `no CI checks available` detail.
 GitHub-reported passing checks produce `checks green`, and failures, pending checks, API errors, or ambiguous output remain non-terminal working states.
 No-CI, green CI, and failed CI therefore remain distinct in current-state output and status-log guidance.

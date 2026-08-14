@@ -37,10 +37,35 @@ case "${1:-}" in
     printf '%s\n' "$*" >> "$state/log"
     touch "$state/has-container" "$state/has-resource"
     ;;
-  container|service|compose)
+  container|compose)
     printf '%s\n' "$*" >> "$state/log"
     case "${2:-}" in
       run|create|up) touch "$state/has-container" "$state/has-resource" ;;
+    esac
+    ;;
+  service)
+    printf '%s\n' "$*" >> "$state/log"
+    case "${2:-}" in
+      ls)
+        [ -e "$state/has-service" ] && printf 'svc1\n'
+        ;;
+      create)
+        touch "$state/has-service" "$state/has-resource"
+        ;;
+      rm)
+        rm -f "$state/has-service" "$state/has-resource"
+        touch "$state/removed"
+        ;;
+      inspect)
+        [ "${3:-}" = --format ] && [ -e "$state/has-service" ] || exit 1
+        fake_owner=${FM_FAKE_DOCKER_OWNER:-firstmate:owner:task}
+        fake_task=resource-task
+        fake_home=${FM_FAKE_DOCKER_HOME:-resource-home}
+        fake_backend=tmux
+        fake_endpoint=fleet:fm-resource-task
+        fake_project=${FM_FAKE_DOCKER_PROJECT:-fm-firstmate-resource-task}
+        printf '%s|%s|%s|%s|%s|%s\n' "$fake_owner" "$fake_task" "$fake_home" "$fake_backend" "$fake_endpoint" "$fake_project"
+        ;;
     esac
     ;;
   volume)
@@ -89,7 +114,18 @@ case "${1:-}" in
         net1) [ -e "$state/has-network" ] || exit 1 ;;
         *) exit 1 ;;
       esac
-      printf '%s\tresource-task\tresource-home\ttmux\tfleet:fm-resource-task\tfm-firstmate-resource-task\n' "${FM_FAKE_DOCKER_OWNER:-firstmate:owner:task}"
+      fake_owner=${FM_FAKE_DOCKER_OWNER:-firstmate:owner:task}
+      fake_task=resource-task
+      fake_home=${FM_FAKE_DOCKER_HOME:-resource-home}
+      fake_backend=tmux
+      fake_endpoint=fleet:fm-resource-task
+      fake_project=${FM_FAKE_DOCKER_PROJECT:-fm-firstmate-resource-task}
+      [ "${FM_FAKE_DOCKER_OWNER_EMPTY:-0}" = 1 ] && fake_owner=
+      [ "${FM_FAKE_DOCKER_TASK_EMPTY:-0}" = 1 ] && fake_task=
+      [ "${FM_FAKE_DOCKER_OWNER_EMPTY:-0}" = 1 ] && fake_home=
+      [ "${FM_FAKE_DOCKER_OWNER_EMPTY:-0}" = 1 ] && fake_backend=
+      [ "${FM_FAKE_DOCKER_OWNER_EMPTY:-0}" = 1 ] && fake_endpoint=
+      printf '%s|%s|%s|%s|%s|%s\n' "$fake_owner" "$fake_task" "$fake_home" "$fake_backend" "$fake_endpoint" "$fake_project"
     else
       case "${2:-}" in
         cid1) [ -e "$state/has-container" ] || exit 1 ;;
@@ -127,12 +163,16 @@ for arg in "$@"; do
   fi
 done
 is_live() {
+  [ -n "${FM_FAKE_TMUX_KILLED_FILE:-}" ] && [ -e "$FM_FAKE_TMUX_KILLED_FILE" ] && [ "$(cat "$FM_FAKE_TMUX_KILLED_FILE")" = "$target" ] && return 1
   [ "${FM_FAKE_TMUX_LIVE:-0}" = 1 ] || [ -n "${FM_FAKE_TMUX_LIVE_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_LIVE_TARGET" ]
 }
 case "${1:-}" in
   display-message)
     is_live || exit 1
-    printf '%%1\n'
+    case "$*" in
+      *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_LIVE_COMMAND:-bash}" ;;
+      *) printf '%%1\n' ;;
+    esac
     ;;
   current-command)
     if [ -n "${FM_FAKE_TMUX_LIVE_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_LIVE_TARGET" ]; then
@@ -151,6 +191,9 @@ case "${1:-}" in
     ;;
   has-session)
     [ "${FM_FAKE_TMUX_LIVE:-0}" = 1 ]
+    ;;
+  kill-window)
+    [ -n "${FM_FAKE_TMUX_KILLED_FILE:-}" ] && printf '%s\n' "$target" > "$FM_FAKE_TMUX_KILLED_FILE"
     ;;
 esac
 exit 0
@@ -188,14 +231,30 @@ test_labels_and_teardown_cleanup() {
     || fail "task Docker wrapper failed"
   grep -F -- "--label com.firstmate.owner=$owner" "$DOCKER_STATE/log" >/dev/null \
     || fail "Docker wrapper did not add the exact owner label"
+  ( set -u; eval "$(fm_resource_task_env_line "$manifest")"; FM_TASK_RESOURCE_OWNER=firstmate:other-task "$tasktmp/bin/docker" run postgres ) \
+    || fail "Docker wrapper failed when the caller supplied a conflicting owner environment value"
+  if grep -F -- "--label com.firstmate.owner=firstmate:other-task" "$DOCKER_STATE/log" >/dev/null; then
+    fail "Docker wrapper accepted a caller-supplied owner environment value"
+  fi
+  local other_manifest
+  other_manifest=$(prepare_task "$home" resource-other "$TMP_ROOT/fm-resource-other")
+  if ( set -u; eval "$(fm_resource_task_env_line "$manifest")"; FM_TASK_RESOURCE_MANIFEST="$other_manifest" "$tasktmp/bin/docker" run postgres ) >/dev/null 2>&1; then
+    fail "Docker wrapper accepted a manifest from another task"
+  fi
   ( set -u; eval "$(fm_resource_task_env_line "$manifest")"; "$tasktmp/bin/docker" network create task-net ) \
     || fail "task Docker network wrapper failed"
   ( set -u; eval "$(fm_resource_task_env_line "$manifest")"; "$tasktmp/bin/docker" volume create task-volume ) \
     || fail "task Docker volume wrapper failed"
+  ( set -u; eval "$(fm_resource_task_env_line "$manifest")"; "$tasktmp/bin/docker" service create db-service ) \
+    || fail "task Docker service wrapper failed"
+  if ( set -u; eval "$(fm_resource_task_env_line "$manifest")"; COMPOSE_PROJECT_NAME=other-project "$tasktmp/bin/docker" compose up >/dev/null 2>&1 ); then
+    fail "Docker Compose wrapper accepted an environment project override"
+  fi
   touch "$manifest.docker-used" "$manifest.chrome-used"
   ( set -u; eval "$(fm_resource_task_env_line "$manifest")"; "$tasktmp/bin/chrome-devtools-axi" open https://example.invalid ) \
     || fail "task Chrome wrapper failed"
   FM_HOME="$home" FM_ROOT="$ROOT" PATH="$FAKEBIN:$PATH" FM_FAKE_DOCKER_STATE="$DOCKER_STATE" FM_FAKE_DOCKER_OWNER="$owner" \
+    FM_FAKE_DOCKER_HOME="$(fm_resource_manifest_get "$manifest" home_tag)" \
     FM_FAKE_CHROME_LOG="$CHROME_LOG" fm_resource_cleanup_task "$id" "$home" "$ROOT" "$home/state" "$tasktmp" "$manifest" \
     >/dev/null || fail "resource cleanup failed for a fully tagged task"
   [ ! -e "$tasktmp" ] || fail "tagged task temp root survived cleanup"
@@ -219,6 +278,26 @@ test_untagged_temp_is_preserved() {
   pass "untagged temp roots are preserved"
 }
 
+test_home_scoped_temp_root_is_validated() {
+  local home id tag tasktmp manifest owner validated
+  home=$(new_home scoped-temp)
+  id=resource-task
+  tag=$(fm_resource_home_tag_for "$home" "$ROOT")
+  tasktmp="$TMP_ROOT/fm-$id-$tag"
+  manifest=$(prepare_task "$home" "$id" "$tasktmp")
+  owner=$(fm_resource_manifest_get "$manifest" owner)
+  validated=$(fm_resource_validate_task_tmp "$id" "$tasktmp" "$owner" "$home" "$ROOT" "$tag")
+  [ "$validated" = "$(cd "$tasktmp" && pwd -P)" ] || fail "home-scoped temp root did not validate as task-owned"
+  ( set -u; eval "$(fm_resource_task_env_line "$manifest")"; "$tasktmp/bin/docker" run postgres ) \
+    || fail "Docker wrapper rejected a home-scoped task temp root"
+  FM_HOME="$home" FM_ROOT="$ROOT" PATH="$FAKEBIN:$PATH" FM_FAKE_DOCKER_STATE="$DOCKER_STATE" \
+    FM_FAKE_DOCKER_OWNER="$owner" FM_FAKE_DOCKER_HOME="$tag" \
+    fm_resource_cleanup_task "$id" "$home" "$ROOT" "$home/state" "$tasktmp" "$manifest" >/dev/null \
+    || fail "home-scoped temp root cleanup failed"
+  [ ! -e "$tasktmp" ] || fail "home-scoped temp root survived cleanup"
+  pass "home-scoped temp roots remain exact-owner cleanup targets"
+}
+
 test_mismatched_docker_owner_is_preserved() {
   local home owner project
   home=$(new_home mismatched-docker)
@@ -234,6 +313,71 @@ test_mismatched_docker_owner_is_preserved() {
   [ -e "$DOCKER_STATE/has-container" ] || fail "Docker mismatch fixture was unexpectedly removed"
   rm -f "$DOCKER_STATE/has-container" "$DOCKER_STATE/has-resource"
   pass "mismatched Docker ownership is preserved"
+}
+
+test_docker_requires_exact_proof() {
+  local home owner project tag
+  home=$(new_home docker-proof)
+  owner=$(fm_resource_owner_for "$home" "$ROOT" resource-task)
+  project=$(fm_resource_compose_project_for "$home" "$ROOT" resource-task)
+  tag=$(fm_resource_manifest_get "$(prepare_task "$home" resource-task "$TMP_ROOT/fm-resource-task-proof")" home_tag)
+
+  rm -f "$DOCKER_STATE/removed"
+  touch "$DOCKER_STATE/has-container" "$DOCKER_STATE/has-resource"
+  if FM_FAKE_DOCKER_OWNER_EMPTY=1 FM_FAKE_DOCKER_TASK_EMPTY=1 FM_FAKE_DOCKER_PROJECT="$project" \
+    FM_FAKE_DOCKER_STATE="$DOCKER_STATE" PATH="$FAKEBIN:$PATH" \
+    fm_resource_docker_cleanup "$owner" resource-task "$project" 1 "$tag" tmux fleet:fm-resource-task 0 >/dev/null 2>&1; then
+    :
+  else
+    fail "Docker cleanup rejected an exact Compose project proof"
+  fi
+  [ -e "$DOCKER_STATE/removed" ] || fail "Compose project proof did not remove the resource"
+
+  rm -f "$DOCKER_STATE/removed"
+  touch "$DOCKER_STATE/has-container" "$DOCKER_STATE/has-resource"
+  if FM_FAKE_DOCKER_OWNER=firstmate:other-task FM_FAKE_DOCKER_PROJECT="$project" \
+    FM_FAKE_DOCKER_STATE="$DOCKER_STATE" PATH="$FAKEBIN:$PATH" \
+    fm_resource_docker_cleanup "$owner" resource-task "$project" 1 "$tag" tmux fleet:fm-resource-task 0 >/dev/null 2>&1; then
+    fail "Docker cleanup accepted conflicting firstmate labels on a Compose project"
+  fi
+  [ ! -e "$DOCKER_STATE/removed" ] || fail "conflicting Compose resource was removed"
+
+  rm -f "$DOCKER_STATE/removed"
+  touch "$DOCKER_STATE/has-container" "$DOCKER_STATE/has-resource"
+  if FM_FAKE_DOCKER_TASK_EMPTY=1 FM_FAKE_DOCKER_OWNER="$owner" \
+    FM_FAKE_DOCKER_STATE="$DOCKER_STATE" PATH="$FAKEBIN:$PATH" \
+    fm_resource_docker_cleanup "$owner" resource-task "$project" 1 "$tag" tmux fleet:fm-resource-task 0 >/dev/null 2>&1; then
+    fail "Docker cleanup accepted a direct resource without its task label"
+  fi
+  [ ! -e "$DOCKER_STATE/removed" ] || fail "direct resource without task label was removed"
+  rm -f "$DOCKER_STATE/has-container" "$DOCKER_STATE/has-resource"
+  pass "Docker cleanup requires exact direct or Compose ownership proof"
+}
+
+test_gc_kills_dead_endpoint_before_resources() {
+  local home id tasktmp manifest meta killed
+  home=$(new_home gc-endpoint)
+  id=resource-endpoint
+  tasktmp="$TMP_ROOT/fm-$id"
+  manifest=$(prepare_task "$home" "$id" "$tasktmp")
+  meta="$home/state/$id.meta"
+  killed="$TMP_ROOT/killed-endpoint"
+  cat > "$meta" <<EOF
+window=fleet:fm-$id
+worktree=$ROOT
+project=$ROOT
+backend=tmux
+EOF
+  FM_FAKE_TMUX_LIVE=0 FM_FAKE_TMUX_LIVE_TARGET="fleet:fm-$id" FM_FAKE_TMUX_LIVE_COMMAND=bash \
+    FM_FAKE_TMUX_KILLED_FILE="$killed" FM_FAKE_DOCKER_STATE="$DOCKER_STATE" \
+    FM_FAKE_CHROME_LOG="$CHROME_LOG" FM_HOME="$home" FM_ROOT="$ROOT" PATH="$FAKEBIN:$PATH" \
+    "$ROOT/bin/fm-resource-gc.sh" >/dev/null \
+    || fail "orphan GC failed after proving a dead endpoint"
+  grep -Fx "fleet:fm-$id" "$killed" >/dev/null \
+    || fail "orphan GC did not remove the exact dead endpoint"
+  [ ! -e "$manifest" ] || fail "orphan GC kept resources after endpoint cleanup"
+  [ ! -e "$tasktmp" ] || fail "orphan GC kept the owned temp root"
+  pass "orphan GC removes a proven dead endpoint before task resources"
 }
 
 test_gc_requires_dead_owner() {
@@ -271,5 +415,8 @@ export FM_FAKE_DOCKER_STATE="$DOCKER_STATE" FM_FAKE_CHROME_LOG="$CHROME_LOG"
 
 test_labels_and_teardown_cleanup
 test_untagged_temp_is_preserved
+test_home_scoped_temp_root_is_validated
 test_mismatched_docker_owner_is_preserved
+test_docker_requires_exact_proof
 test_gc_requires_dead_owner
+test_gc_kills_dead_endpoint_before_resources

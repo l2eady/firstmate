@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|no-ci|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -131,7 +131,9 @@ map_log_state() {  # <line>
     working)        echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
-    done)           echo "done" ;;
+    done)
+      if log_reports_ci_no_checks; then echo no-ci; else echo "done"; fi
+      ;;
     failed)         echo failed ;;
     *)              echo unknown ;;
   esac
@@ -298,6 +300,13 @@ log_reports_ci_ready() {
     *) return 1 ;;
   esac
 }
+log_reports_ci_no_checks() {
+  [ "$LOG_VERB" = "done" ] || return 1
+  case "$(log_note_of "$LOG_LINE")" in
+    *"no CI checks available"*|*"CI unavailable"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 nm_ci_step_status() {
   local row rest
@@ -366,7 +375,10 @@ nm_github_pr_checks_state() {  # <output> <status>
   local output=$1 status=$2 lower
   lower=$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')
   case "$lower" in
-    *"no ci checks configured"*) printf 'no-ci'; return 0 ;;
+    *"no ci checks configured"*|*"no checks configured"*)
+      [ "$status" -eq 0 ] && printf 'no-ci' || printf 'unknown'
+      return 0
+      ;;
     *failure*|*cancelled*|*"timed out"*) printf 'not-ready'; return 0 ;;
     *pending*|*queued*|*"in progress"*|*expected*) printf 'not-ready'; return 0 ;;
   esac
@@ -593,7 +605,7 @@ if [ "$HAVE_RUN" = 1 ]; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
             elif [ "$CI_LOG_STATE" = no-ci ]; then
-              RUN_STATE="done"
+              RUN_STATE="no-ci"
               RUN_DETAIL="no CI checks available: PR ready for review (stop waiting for CI)"
             fi
             ;;
@@ -605,7 +617,11 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
+  ci_status_log_no_ci=0
+  if log_reports_ci_no_checks; then
+    ci_status_log_no_ci=1
+  fi
+  if [ "$RUN_STATE" = working ] && { log_reports_ci_ready || [ "$ci_status_log_no_ci" = 1 ]; }; then
     if [ "$RUN_SOURCE" = coarse ]; then
       emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
     fi
@@ -618,8 +634,8 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" = no-ci ]; then
-      emit "done" status-log "no CI checks available: stop waiting for CI"
-    elif [ "$CI_LOG_STATE" != not-ready ]; then
+      emit "no-ci" run-step "no CI checks available: stop waiting for CI"
+    elif [ "$ci_status_log_no_ci" = 0 ] && [ "$CI_LOG_STATE" != not-ready ]; then
       emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi

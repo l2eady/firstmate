@@ -32,19 +32,17 @@ esac
 rc=0
 for manifest in "$STATE"/*.resources; do
   [ -f "$manifest" ] || continue
+  if [ -L "$manifest" ]; then
+    echo "resource: preserving symbolic-link manifest $manifest" >&2
+    rc=1
+    continue
+  fi
   id=$(basename "$manifest" .resources)
   owner=$(fm_resource_manifest_get "$manifest" owner)
   resource_home=$(fm_resource_manifest_get "$manifest" home)
   resource_root=$(fm_resource_manifest_get "$manifest" root)
-  [ -n "$resource_root" ] || resource_root=$FM_ROOT
-  [ -n "$owner" ] && [ -n "$resource_home" ] || {
-    echo "resource: preserving unparseable manifest $manifest" >&2
-    rc=1
-    continue
-  }
-  expected_owner=$(fm_resource_owner_for "$resource_home" "$resource_root" "$id" 2>/dev/null || true)
-  if [ "$owner" != "$expected_owner" ]; then
-    echo "resource: preserving manifest $manifest because ownership cannot be proven" >&2
+  if ! fm_resource_validate_manifest "$id" "$STATE" "$manifest" 1; then
+    echo "resource: preserving manifest $manifest because ownership or endpoint identity cannot be proven" >&2
     rc=1
     continue
   fi
@@ -55,6 +53,10 @@ for manifest in "$STATE"/*.resources; do
   fi
   if [ "$DRY_RUN" = 1 ]; then
     echo "resource: orphan eligible for cleanup $owner"
+    continue
+  fi
+  if ! fm_resource_endpoint_cleanup "$id" "$resource_home" "$resource_root" "$meta" "$manifest"; then
+    rc=1
     continue
   fi
   if fm_resource_cleanup_task "$id" "$resource_home" "$resource_root" "$STATE" "" "$manifest"; then

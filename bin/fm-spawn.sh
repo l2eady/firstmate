@@ -1184,29 +1184,36 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$REUSE_RECORDED_WOR
   validate_treehouse_project_worktree "treehouse get" "$T"
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
-
-# Resource ownership is established before the agent launch, so a killed agent
-# cannot take the ownership record with it. A task that explicitly connects to a
-# captain-owned browser keeps that browser unowned and is never stopped by teardown.
-BROWSER_RESOURCE_OWNED=1
-[ -z "${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}" ] || BROWSER_RESOURCE_OWNED=0
-if [ "${CHROME_DEVTOOLS_AXI_AUTO_CONNECT:-0}" = 1 ] || [ "${CHROME_DEVTOOLS_AXI_AUTO_CONNECT:-0}" = true ]; then
-  BROWSER_RESOURCE_OWNED=0
-fi
-[ -z "${CHROME_DEVTOOLS_AXI_USER_DATA_DIR:-}" ] || BROWSER_RESOURCE_OWNED=0
 RESOURCE_HOME=$FM_HOME
 RESOURCE_ROOT=$FM_ROOT
 if [ "$KIND" = secondmate ]; then
   RESOURCE_HOME=$PROJ_ABS
   RESOURCE_ROOT=$PROJ_ABS
 fi
+# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. The
+# ownership preparation below creates GOTMPDIR and its marker before the task uses it.
+# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
+# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
+# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+TASK_TMP="/tmp/fm-$ID"
+EXPECTED_RESOURCE_OWNER=$(fm_resource_owner_for "$RESOURCE_HOME" "$RESOURCE_ROOT" "$ID")
+if [ -e "$TASK_TMP" ] || [ -L "$TASK_TMP" ]; then
+  EXISTING_RESOURCE_OWNER=$(fm_resource_marker_get "$TASK_TMP/$FM_RESOURCE_OWNER_MARKER" owner 2>/dev/null || true)
+  if [ -L "$TASK_TMP" ] || [ "$EXISTING_RESOURCE_OWNER" != "$EXPECTED_RESOURCE_OWNER" ]; then
+    RESOURCE_HOME_TAG=$(fm_resource_home_tag_for "$RESOURCE_HOME" "$RESOURCE_ROOT")
+    TASK_TMP="/tmp/fm-$ID-$RESOURCE_HOME_TAG"
+  fi
+fi
+
+# Resource ownership is established before the agent launch, so a killed agent
+# cannot take the ownership record with it. A task that explicitly connects to an
+# externally owned browser keeps that browser unowned and is never stopped by teardown.
+BROWSER_RESOURCE_OWNED=1
+[ -z "${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}" ] || BROWSER_RESOURCE_OWNED=0
+if [ "${CHROME_DEVTOOLS_AXI_AUTO_CONNECT:-0}" = 1 ] || [ "${CHROME_DEVTOOLS_AXI_AUTO_CONNECT:-0}" = true ]; then
+  BROWSER_RESOURCE_OWNED=0
+fi
+[ -z "${CHROME_DEVTOOLS_AXI_USER_DATA_DIR:-}" ] || BROWSER_RESOURCE_OWNED=0
 TASK_RESOURCE_MANIFEST=$(fm_resource_prepare_task "$ID" "$RESOURCE_HOME" "$RESOURCE_ROOT" "$STATE" "$TASK_TMP" "$BACKEND" "$T" "$BROWSER_RESOURCE_OWNED")
 TASK_RESOURCE_OWNER=$(fm_resource_manifest_get "$TASK_RESOURCE_MANIFEST" owner)
 RESOURCE_ENV=$(fm_resource_task_env_line "$TASK_RESOURCE_MANIFEST")

@@ -3,7 +3,7 @@
 #
 # fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
 # gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
-# meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
+# meta. The resource ownership preparation creates the root before the task can use it.
 #
 # These tests exercise behavior directly: fm-teardown is run as a subprocess against a
 # fake FM_HOME/FM_ROOT (built so the real script resolves into it), with stub helper scripts.
@@ -86,12 +86,19 @@ yolo=off
 tasktmp=$tasktmp
 META
   if [ -d "$tasktmp" ]; then
-    local owner
+    local owner home_abs root_abs home_tag
     owner=$(FM_HOME="$fake" FM_ROOT="$fake" bash -c '. "$1/bin/fm-resource-lib.sh"; fm_resource_owner_for "$2" "$2" "$3"' _ "$ROOT" "$fake" "$id")
+    home_abs=$(cd "$fake" && pwd -P)
+    root_abs=$home_abs
+    home_tag=$(FM_HOME="$fake" FM_ROOT="$fake" bash -c '. "$1/bin/fm-resource-lib.sh"; fm_resource_home_tag_for "$2" "$2"' _ "$ROOT" "$fake")
     {
       printf 'version=1\n'
       printf 'owner=%s\n' "$owner"
       printf 'task=%s\n' "$id"
+      printf 'home=%s\n' "$home_abs"
+      printf 'home_tag=%s\n' "$home_tag"
+      printf 'root=%s\n' "$root_abs"
+      printf 'resource=task\n'
     } > "$tasktmp/.fm-resource-owner"
   fi
   printf '%s' "$fake"
@@ -100,23 +107,23 @@ META
 # --- fm-spawn side ---
 
 test_spawn_contract_and_mkdir_pattern() {
-  # Structural: fm-spawn must create the gotmp dir, record tasktmp in meta, and export
-  # GOTMPDIR into the pane. Assert the contract lines are present in the source.
+  # Structural: fm-spawn must invoke resource preparation, record tasktmp in meta, and
+  # export GOTMPDIR into the pane. Assert the contract lines are present in the source.
   # shellcheck disable=SC2016  # single quotes are deliberate: these are literal source strings
-  grep -F 'mkdir -p "$TASK_TMP/gotmp"' "$SPAWN" >/dev/null \
-    || fail "fm-spawn missing: mkdir of gotmp under TASK_TMP"
+  grep -F 'fm_resource_prepare_task' "$SPAWN" >/dev/null \
+    || fail "fm-spawn missing: resource ownership preparation"
   # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
   grep -F 'echo "tasktmp=$TASK_TMP"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: tasktmp= line in meta write"
   grep -F 'export GOTMPDIR=' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: GOTMPDIR export into pane"
-  # Behavioral: the mkdir + meta-write pattern spawn uses must produce a gotmp dir and
+  # Behavioral: the resource-root + meta-write pattern spawn uses must produce a gotmp dir and
   # a meta line whose value the teardown grep (tasktmp=, cut -d= -f2-) reads back whole.
   local id=spawn-sim-z1
   local sim_root="$TMP_ROOT/$id-root"
   local task_tmp="$sim_root/tmp/fm-$id"
   mkdir -p "$sim_root/state"
-  # Replicate spawn's exact mkdir + meta-write lines.
+  # Replicate the resource preparation's directory + meta-write result.
   TASK_TMP="$task_tmp"
   mkdir -p "$TASK_TMP/gotmp"
   {

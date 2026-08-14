@@ -525,9 +525,10 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
+  assert_contains "$out" "state: no-ci" "terminal no-checks ci-monitor run -> no-CI"
   assert_contains "$out" "no CI checks available" "terminal no-checks detail names absent CI"
   assert_not_contains "$out" "checks green" "terminal no-checks detail is not green"
+  assert_not_contains "$out" "state: done" "terminal no-checks state is not green done"
   pass "terminal no-checks ci-monitor marker surfaces a distinct no-CI state"
 }
 
@@ -542,6 +543,7 @@ test_ci_monitoring_no_checks_rechecks_before_done() {
   FM_FAKE_GH_CHECKS_CALLS_FILE="$d/gh-checks.calls"
   local out; out=$(run_crew_state "$d" feat-cinochecks-recheck)
   assert_contains "$out" "no CI checks available" "confirmed no-checks result surfaces as no-CI"
+  assert_contains "$out" "state: no-ci" "confirmed no-checks result has a distinct state"
   [ "$(cat "$d/gh-checks.calls")" = 2 ] || fail "no-checks result was not checked twice"
   pass "no-CI conclusion gets a second GitHub check after the grace path"
 }
@@ -576,6 +578,22 @@ test_ci_monitoring_no_checks_transient_error_stays_working() {
   assert_contains "$out" "state: working" "transient GitHub failure stays working"
   assert_not_contains "$out" "no CI checks available" "transient GitHub failure is not no-CI"
   pass "transient GitHub failure does not become a false no-CI conclusion"
+}
+
+test_ci_monitoring_status_log_no_checks_requires_current_confirmation() {
+  reset_fakes
+  local d; d=$(new_case ci-nochecks-stale-log)
+  make_repo_on_branch "$d/wt" fm/feat-cinochecksstale
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinochecksstale.meta" "window=fm:fm-feat-cinochecksstale" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 no CI checks available\n' > "$d/state/feat-cinochecksstale.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecksstale)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  FM_FAKE_GH_CHECKS_STATUS=1
+  local out; out=$(run_crew_state "$d" feat-cinochecksstale)
+  assert_contains "$out" "state: working" "stale no-CI log with an API error stays working"
+  assert_not_contains "$out" "state: no-ci" "stale no-CI log cannot bypass current confirmation"
+  pass "no-CI status logs require a current confirmed GitHub result"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -947,6 +965,22 @@ test_no_run_idle_pane_uses_log() {
   pass "no run + idle pane uses the status-log verb"
 }
 
+test_no_run_idle_no_ci_log_stays_distinct() {
+  reset_fakes
+  local d; d=$(new_case idle-no-ci)
+  make_repo_on_branch "$d/wt" fm/feat-idlenoci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-idlenoci.meta" "window=fm:fm-feat-idlenoci" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 no CI checks available\n' > "$d/state/feat-idlenoci.status"
+  FM_FAKE_AXI_STATUS=
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-idlenoci)
+  assert_contains "$out" "state: no-ci" "idle no-CI status log -> no-CI"
+  assert_contains "$out" "source: status-log" "idle no-CI status log -> status-log source"
+  assert_not_contains "$out" "state: done" "idle no-CI status log is not green done"
+  pass "no-CI status logs stay distinct without an active run"
+}
+
 # (g') no run + idle pane on a DECLARED external-wait pause -> state: paused, so a
 # supervisor reading the crew sees a distinct pause (and its reason) rather than a
 # wedge-suspect idle. This is the reader half the watcher/daemon build on.
@@ -1175,6 +1209,7 @@ test_ci_monitoring_no_checks_terminal_surfaces_done
 test_ci_monitoring_no_checks_rechecks_before_done
 test_ci_monitoring_github_green_stays_distinct_from_no_ci
 test_ci_monitoring_no_checks_transient_error_stays_working
+test_ci_monitoring_status_log_no_checks_requires_current_confirmation
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
@@ -1194,6 +1229,7 @@ test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
 test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle
 test_no_run_idle_pane_uses_log
+test_no_run_idle_no_ci_log_stays_distinct
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_dead_window_ignores_stale_status_log
