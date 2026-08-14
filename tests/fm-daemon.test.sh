@@ -280,6 +280,33 @@ test_housekeeping_seeds_pause_marker_from_status() {
   pass "housekeeping seeds pause tracking from status without a watcher marker"
 }
 
+# A pause marker can race with teardown: the watcher may have captured a live
+# endpoint just before teardown removes its metadata, then write the marker after
+# the cleanup purge. The old window_for_task tmux fallback treated any matching
+# live window as the dead task and re-surfaced the orphaned pause every hour.
+# Without metadata, the marker must be retired even when an unrelated tmux window
+# happens to share the old task label.
+test_housekeeping_drops_orphaned_pause_marker_without_metadata() {
+  local dir state fakebin pane key task unowned_window
+  dir=$(make_supercase orphaned-pause-marker)
+  state="$dir/state"; fakebin="$dir/fakebin"; pane="$dir/pane.txt"
+  task=cv-transport-report-grain-k8
+  unowned_window="firstmate:fm-$task"
+  printf 'paused: uncommitted work was preserved for a review that no longer exists\n' > "$state/$task.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  [ ! -e "$state/$task.meta" ] || fail "fixture unexpectedly has metadata for the orphaned task"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$unowned_window" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an absent task's paused marker was re-escalated through an unowned live window: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-paused-$key" ] \
+    || fail "an absent task's paused marker survived housekeeping"
+  pass "housekeeping retires paused bookkeeping when task metadata is absent"
+}
+
 # housekeeping re-surfaces a stale declared pause only past PAUSE_RESURFACE_SECS,
 # as an awaiting-external recheck (never a wedge), and RESETS the marker so the
 # window repeats rather than firing once.
@@ -288,6 +315,7 @@ test_housekeeping_paused_resurfaces_and_resets() {
   dir=$(make_supercase paused-resurface)
   state="$dir/state"; fakebin="$dir/fakebin"
   win="sess:fm-held-w11"; pane="$dir/pane.txt"
+  fm_write_meta "$state/held-w11.meta" "window=$win" "kind=ship"
   printf 'paused: holding for the upstream tool release\n' > "$state/held-w11.status"
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "held-w11" | tr ':/.' '___')
@@ -309,6 +337,7 @@ test_housekeeping_paused_resumed_cleared() {
   dir=$(make_supercase paused-resumed)
   state="$dir/state"; fakebin="$dir/fakebin"
   win="sess:fm-held-w12"; pane="$dir/pane.txt"
+  fm_write_meta "$state/held-w12.meta" "window=$win" "kind=ship"
   printf 'paused: holding for the upstream tool release\n' > "$state/held-w12.status"
   printf 'Working...\n' > "$pane"
   key=$(printf '%s' "held-w12" | tr ':/.' '___')
@@ -328,6 +357,7 @@ test_housekeeping_paused_unpaused_cleared() {
   dir=$(make_supercase paused-unpaused)
   state="$dir/state"; fakebin="$dir/fakebin"
   win="sess:fm-held-w13"; pane="$dir/pane.txt"
+  fm_write_meta "$state/held-w13.meta" "window=$win" "kind=ship"
   printf 'paused: holding for the upstream release\nworking: resumed, upstream landed\n' > "$state/held-w13.status"
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "held-w13" | tr ':/.' '___')
@@ -343,6 +373,7 @@ test_housekeeping_stale_marker_transitions_to_pause() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-to-paused)
   state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-held-w14"; pane="$dir/pane.txt"
+  fm_write_meta "$state/held-w14.meta" "window=$win" "kind=ship"
   printf 'paused: awaiting the upstream tool release\n' > "$state/held-w14.status"
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "held-w14" | tr ':/.' '___')
@@ -359,6 +390,7 @@ test_housekeeping_pause_marker_transitions_to_clear() {
   local dir state fakebin win pane key
   dir=$(make_supercase paused-to-stale)
   state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-held-w15"; pane="$dir/pane.txt"
+  fm_write_meta "$state/held-w15.meta" "window=$win" "kind=ship"
   printf 'working: upstream landed, resuming\n' > "$state/held-w15.status"
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "held-w15" | tr ':/.' '___')
@@ -378,6 +410,7 @@ test_housekeeping_persistent_stale_escalates() {
   fakebin="$dir/fakebin"
   win="sess:fm-pers-w5"
   pane="$dir/pane.txt"
+  fm_write_meta "$state/pers-w5.meta" "window=$win" "kind=ship"
   printf 'working\n' > "$state/pers-w5.status"
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "pers-w5" | tr ':/.' '___')
@@ -396,6 +429,7 @@ test_housekeeping_resumed_stale_cleared() {
   fakebin="$dir/fakebin"
   win="sess:fm-res-w6"
   pane="$dir/pane.txt"
+  fm_write_meta "$state/res-w6.meta" "window=$win" "kind=ship"
   printf 'working\n' > "$state/res-w6.status"
   printf 'Working...\n' > "$pane"
   key=$(printf '%s' "res-w6" | tr ':/.' '___')
@@ -2355,6 +2389,7 @@ test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
+test_housekeeping_drops_orphaned_pause_marker_without_metadata
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets

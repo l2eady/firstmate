@@ -1277,8 +1277,9 @@ housekeeping() {  # <state>
   for marker in "$state"/.subsuper-stale-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-stale-}"
-    # Reconstruct the backend target from metadata, with the live tmux list as the
-    # legacy fallback for old markers that predate meta lookup.
+    # Reconstruct the backend target from current task metadata only. A live
+    # multiplexer window without state metadata is not an owned task endpoint,
+    # so it must not revive a stale marker after teardown removed the task.
     win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
       # Window gone (task torn down): drop the marker, nothing to escalate.
@@ -1397,19 +1398,19 @@ housekeeping() {  # <state>
   fi
 }
 
-# Find a recorded or live window target whose task id matches the marker key.
+# Find the recorded window target whose task id matches the marker key. Task
+# metadata is the ownership proof: a live multiplexer window without a matching
+# state/<id>.meta may be unrelated to this firstmate home, or may be a leftover
+# endpoint after teardown, so it is never a fallback target for supervision
+# bookkeeping.
 window_for_task() {  # <task-key> [state]
-  local key=$1 state=${2:-$(_state_root)} meta task w t
+  local key=$1 state=${2:-$(_state_root)} meta task w
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
     [ "$(_stale_key "$task")" = "$key" ] || continue
     w=$(fm_backend_target_of_meta "$meta")
     [ -n "$w" ] && { printf '%s' "$w"; return 0; }
-  done
-  for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
-    t=$(window_to_task "$w" "$state")
-    [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
   done
   return 1
 }
