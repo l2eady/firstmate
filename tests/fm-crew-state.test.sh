@@ -27,6 +27,8 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (n) real tmux endpoint lifecycle: a recorded live target reconciles alive,
+#       then the same target reconciles gone after its session is killed.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1207,6 +1209,39 @@ test_reconcile_transient_probe_failure_is_not_endpoint_loss() {
   pass "reconciliation confirms endpoint loss with a re-probe instead of trusting one failed probe"
 }
 
+# The fake tmux above models missing targets by exiting nonzero, but real tmux
+# can return success with an empty pane id for a missing session/window target.
+# Exercise the installed tmux lifecycle so reconciliation proves endpoint
+# presence from observable target identity rather than process exit alone.
+test_reconcile_real_tmux_target_lifecycle() {
+  reset_fakes
+  local d real_tmux session window target out
+  d=$(new_case real-tmux-target-lifecycle)
+  real_tmux=$(command -v tmux) || fail "tmux is required for endpoint lifecycle coverage"
+  session="fmcs-real-$$-${RANDOM:-0}"
+  window="fm-real-endpoint"
+  target="$session:$window"
+  mkdir -p "$d/wt"
+  fm_write_meta "$d/state/real-tmux-endpoint.meta" \
+    "window=$target" "worktree=$d/wt" "kind=scout"
+
+  "$real_tmux" new-session -d -s "$session" -n "$window" \
+    || fail "could not create the real tmux endpoint fixture"
+  out=$(FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_ENDPOINT_RETRY_DELAY=0 \
+    "$CREW_STATE" --reconcile real-tmux-endpoint)
+  if ! printf '%s\n' "$out" | grep -Fq "endpoint: alive"; then
+    "$real_tmux" kill-session -t "$session" 2>/dev/null || true
+    fail "real tmux target was not reconciled alive: $out"
+  fi
+
+  "$real_tmux" kill-session -t "$session" \
+    || fail "could not kill the real tmux endpoint fixture"
+  out=$(FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_ENDPOINT_RETRY_DELAY=0 \
+    "$CREW_STATE" --reconcile real-tmux-endpoint)
+  assert_contains "$out" "endpoint: gone" "killed real tmux target is reconciled gone"
+  pass "reconciliation follows a real tmux target from alive to gone"
+}
+
 test_no_timeout_uses_perl_bound() {
   reset_fakes
   local d toolbin out start elapsed calls_file calls
@@ -1374,6 +1409,7 @@ test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_reconcile_active_run_with_dead_endpoint_is_actionable
 test_reconcile_transient_probe_failure_is_not_endpoint_loss
+test_reconcile_real_tmux_target_lifecycle
 test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree
