@@ -102,16 +102,14 @@ fm_backend_tmux_current_path() {  # <target>
 }
 
 # fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
-# composer verification - used for the fixed spawn-time commands
-# (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
-# inline in fm-spawn.sh. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
+# composer verification. Spawn uses it for the fixed `treehouse get` command.
+# Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
 fm_backend_tmux_send_text_line() {  # <target> <text>
   tmux send-keys -t "$1" "$2" Enter
 }
 
-# fm_backend_tmux_send_literal: send TEXT as literal bytes with no
-# submission - the caller sends Enter separately (fm-spawn.sh's launch-command
-# send pauses between the literal send and Enter for the harness to settle).
+# fm_backend_tmux_send_literal: send TEXT as literal bytes with no submission.
+# The shared submit helper sends Enter separately and verifies the composer.
 # Mirrors `tmux send-keys -t "$T" -l "<text>"`.
 fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"

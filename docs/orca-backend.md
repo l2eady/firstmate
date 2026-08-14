@@ -72,7 +72,8 @@ Spawn:
 2. Create an independent Orca worktree with `orca worktree create --repo id:<repo> --name fm-<id> --no-parent --setup skip`.
 3. Reuse the terminal returned by Orca worktree creation only when it appears in the verified `result.terminal.handle` shape, or create a titled terminal in that worktree when Orca returns only the worktree.
 4. Install firstmate's per-harness turn-end hooks in the Orca worktree.
-5. Write metadata, then send `GOTMPDIR` export and the selected harness launch through the recorded Orca terminal.
+5. Write metadata, then source task-local resource-prelude and harness-launch scripts through the recorded Orca terminal.
+   Each script writes a nonce-bound acknowledgement that spawn must observe before advancing.
 
 Operation routing:
 

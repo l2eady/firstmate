@@ -106,6 +106,11 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# The resource prelude and harness launch are written as task-local executable
+# scripts, then submitted through short source commands so long environment or
+# launch text cannot remain partly buffered. Each script writes a nonce-bound
+# acknowledgement, and spawn refuses to advance unless it observes that exact
+# acknowledgement from the current attempt.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
