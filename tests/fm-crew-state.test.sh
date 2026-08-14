@@ -560,6 +560,23 @@ test_ci_monitoring_no_checks_rechecks_before_done() {
   pass "no-CI conclusion gets a second GitHub check after the grace path"
 }
 
+test_live_busy_endpoint_supersedes_terminal_no_ci_run() {
+  reset_fakes
+  local d; d=$(new_case live-busy-no-ci)
+  make_repo_on_branch "$d/wt" fm/feat-live-busy-no-ci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-live-busy-no-ci.meta" "window=fm:fm-feat-live-busy-no-ci" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 no CI checks available\n' > "$d/state/feat-live-busy-no-ci.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-live-busy-no-ci)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  FM_FAKE_BUSY=1
+  local out; out=$(run_crew_state "$d" feat-live-busy-no-ci)
+  assert_contains "$out" "state: working" "a live busy endpoint must override a confirmed no-CI terminal state"
+  assert_contains "$out" "source: pane" "the no-CI terminal override must use the live pane source"
+  assert_not_contains "$out" "state: no-ci" "a live busy endpoint must not be classified no-CI terminal"
+  pass "live busy endpoint supersedes an early no-CI terminal emit"
+}
+
 test_ci_monitoring_github_green_stays_distinct_from_no_ci() {
   reset_fakes
   local d; d=$(new_case ci-github-green)
@@ -1324,6 +1341,7 @@ test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
 test_ci_monitoring_no_checks_rechecks_before_done
+test_live_busy_endpoint_supersedes_terminal_no_ci_run
 test_ci_monitoring_github_green_stays_distinct_from_no_ci
 test_ci_monitoring_no_checks_transient_error_stays_working
 test_ci_monitoring_status_log_no_checks_requires_current_confirmation

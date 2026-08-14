@@ -30,10 +30,9 @@ if [ "${1:-}" = terminal ] && [ "${2:-}" = send ]; then
     [ "$previous" = --text ] && text=$arg
     previous=$arg
   done
-  marker=$(printf '%s\n' "$text" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
-  [ -z "$marker" ] || : > "$marker"
-  launch_script=$(printf '%s\n' "$text" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
-  [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+  case "$text" in
+    *fm-spawn-prelude*|*fm-spawn-launch*) (bash -c "$text") >/dev/null 2>&1 || true ;;
+  esac
 fi
 if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ]; then
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'

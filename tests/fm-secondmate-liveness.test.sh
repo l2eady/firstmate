@@ -211,10 +211,10 @@ case "${1:-}" in
     exit 0 ;;
   send-keys)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
-    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
-    [ -z "$marker" ] || : > "$marker"
-    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
-    [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+    text=${5:-}
+    case "$text" in
+      *fm-spawn-prelude*|*fm-spawn-launch*) (bash -c "$text") >/dev/null 2>&1 || true ;;
+    esac
     exit 0
     ;;
   new-window|kill-window)

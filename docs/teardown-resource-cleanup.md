@@ -18,9 +18,12 @@ The wrappers derive the task identity from their installed task root and validat
 Tasks spawned by the supported lifecycle before resource manifests and markers
 were introduced recorded only `tasktmp=` and created the exact `/tmp/fm-<id>/gotmp`
 shape. Teardown has a narrow compatibility proof for that legacy shape: it is
-enabled only when the current metadata has no resource manifest, the root is the
-canonical `/tmp/fm-<id>` directory recorded for the task, it has a real `gotmp`
-child, and no modern marker exists. All other untagged roots remain preserved.
+enabled only when the current metadata has no resource manifest, the recorded
+endpoint was live with the task's expected target before the scoped kill and is
+gone afterward, the root is the canonical `/tmp/fm-<id>` directory recorded for
+the task, it has a real `gotmp` child, and no modern marker exists. If the
+endpoint is absent or cannot be proven live and gone, cleanup preserves the
+untagged root and metadata. All other untagged roots remain preserved.
 
 ## Docker resources
 

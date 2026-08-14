@@ -9,12 +9,11 @@
 #
 # These tests exercise behavior directly: fm-teardown is run as a subprocess against a
 # fake FM_HOME/FM_ROOT (built so the real script resolves into it), with stub helper scripts.
-# Nothing is sourced. The fm-spawn side is verified both structurally (the source has
-# the contract lines) and behaviorally (the mkdir + meta-write pattern it uses).
+# Nothing is sourced. Spawn's executable prelude contract is covered by
+# fm-spawn-prelude.test.sh; this suite focuses on teardown ownership and cleanup.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 
 fail() {
@@ -24,6 +23,14 @@ fail() {
 
 pass() {
   printf 'ok - %s\n' "$1"
+}
+
+output_contains() {
+  local output=$1 needle=$2 description=$3
+  case "$output" in
+    *"$needle"*) ;;
+    *) fail "$description" ;;
+  esac
 }
 
 TMP_ROOT=
@@ -41,6 +48,14 @@ cleanup() {
 trap cleanup EXIT
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
+
+new_legacy_id() {
+  local prefix=$1 id path
+  id="$prefix-$(basename "$TMP_ROOT")-$$-${RANDOM:-0}"
+  path="/tmp/fm-$id"
+  [ ! -e "$path" ] && [ ! -L "$path" ] || fail "refusing pre-existing legacy fixture path $path"
+  printf '%s' "$id"
+}
 
 # Build a fake FM_HOME/FM_ROOT so the real fm-teardown.sh (symlinked in) resolves
 # state and helper scripts inside it. Stub the helper scripts fm-teardown calls so no
@@ -64,6 +79,25 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-resource-lib.sh" "$fake/bin/fm-resource-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
+  # A fake tmux lets the legacy compatibility proof distinguish a currently
+  # live task endpoint from an unowned or stale task root. The state file is
+  # deliberately opt-in so unrelated teardown fixtures remain endpoint-free.
+  cat > "$fake/bin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_FAKE_TMUX_STATE:-}
+present=0
+[ -n "$state" ] && [ "$(cat "$state" 2>/dev/null || true)" = present ] && present=1
+case "$*" in
+  *"#{pane_current_command}"*) [ "$present" = 1 ] && printf 'codex\n' || exit 1; exit 0 ;;
+  *"#{pane_id}"*) [ "$present" = 1 ] && printf '%%1\n' || exit 1; exit 0 ;;
+esac
+case "${1:-}" in
+  kill-window) [ -z "$state" ] || printf 'gone\n' > "$state"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fake/bin/tmux"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -111,40 +145,6 @@ META
   printf '%s' "$fake"
 }
 
-# --- fm-spawn side ---
-
-test_spawn_contract_and_mkdir_pattern() {
-  # Structural: fm-spawn must invoke resource preparation, record tasktmp in meta, and
-  # export GOTMPDIR into the pane. Assert the contract lines are present in the source.
-  # shellcheck disable=SC2016  # single quotes are deliberate: these are literal source strings
-  grep -F 'fm_resource_prepare_task' "$SPAWN" >/dev/null \
-    || fail "fm-spawn missing: resource ownership preparation"
-  # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
-  grep -F 'echo "tasktmp=$TASK_TMP"' "$SPAWN" >/dev/null \
-    || fail "fm-spawn missing: tasktmp= line in meta write"
-  grep -F 'export GOTMPDIR=' "$SPAWN" >/dev/null \
-    || fail "fm-spawn missing: GOTMPDIR export into pane"
-  # Behavioral: the resource-root + meta-write pattern spawn uses must produce a gotmp dir and
-  # a meta line whose value the teardown grep (tasktmp=, cut -d= -f2-) reads back whole.
-  local id=spawn-sim-z1
-  local sim_root="$TMP_ROOT/$id-root"
-  local task_tmp="$sim_root/tmp/fm-$id"
-  mkdir -p "$sim_root/state"
-  # Replicate the resource preparation's directory + meta-write result.
-  TASK_TMP="$task_tmp"
-  mkdir -p "$TASK_TMP/gotmp"
-  {
-    echo "tasktmp=$TASK_TMP"
-  } > "$sim_root/state/$id.meta"
-  [ -d "$task_tmp/gotmp" ] || fail "simulated spawn did not create gotmp dir"
-  # Teardown reads tasktmp= with `grep '^tasktmp=' | cut -d= -f2-`; round-trip it.
-  local read_back
-  read_back=$(grep '^tasktmp=' "$sim_root/state/$id.meta" | cut -d= -f2-)
-  [ "$read_back" = "$task_tmp" ] \
-    || fail "tasktmp value not round-tripped by teardown's grep|cut (got '$read_back')"
-  pass "fm-spawn creates gotmp dir and records tasktmp in meta"
-}
-
 # --- fm-teardown side (real subprocess) ---
 
 test_teardown_removes_tasktmp_dir() {
@@ -158,7 +158,7 @@ test_teardown_removes_tasktmp_dir() {
   [ -d "$task_tmp/gotmp" ] || fail "precondition: gotmp missing before teardown"
   # Run the REAL teardown against the fake root.
   local teardown_output
-  teardown_output=$(FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1) \
+  teardown_output=$(PATH="$fake/bin:$PATH" FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1) \
     || { printf '%s\n' "$teardown_output" >&2; fail "teardown exited non-zero with a valid tasktmp"; }
   [ ! -e "$task_tmp" ] \
     || fail "teardown did not remove the tasktmp dir ($task_tmp still exists)"
@@ -166,20 +166,41 @@ test_teardown_removes_tasktmp_dir() {
 }
 
 test_teardown_removes_supported_legacy_untagged_tasktmp_only() {
-  local id=td-legacy-untagged-z5
-  local task_tmp="/tmp/fm-$id" unrelated="/tmp/fm-unrelated-untagged-z6" fake teardown_output
+  local id unrelated_id task_tmp unrelated fake teardown_output
+  id=$(new_legacy_id td-legacy-untagged)
+  unrelated_id=$(new_legacy_id unrelated-untagged)
+  task_tmp="/tmp/fm-$id"
+  unrelated="/tmp/fm-$unrelated_id"
   LEGACY_TMP_PATHS+=("$task_tmp" "$unrelated")
   mkdir -p "$task_tmp/gotmp" "$unrelated/gotmp"
   fake=$(make_fake_root "$id" "$task_tmp")
   # Simulate the supported pre-manifest lifecycle: tasktmp= and gotmp existed,
   # but no owner marker or resource_manifest was written yet.
   mv "$task_tmp/.fm-resource-owner" "$TMP_ROOT/$id.marker"
-  teardown_output=$(FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1) \
+  printf 'present\n' > "$fake/tmux-state"
+  teardown_output=$(FM_FAKE_TMUX_STATE="$fake/tmux-state" PATH="$fake/bin:$PATH" FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1) \
     || { printf '%s\n' "$teardown_output" >&2; fail "legacy supported task teardown exited non-zero"; }
   [ ! -e "$task_tmp" ] || fail "supported legacy task temp root survived teardown"
   [ ! -e "$fake/state/$id.meta" ] || fail "legacy teardown left task metadata behind"
   [ -d "$unrelated" ] || fail "teardown removed an unrelated untagged temp root"
   pass "teardown cleans the exact supported legacy task root and protects unrelated untagged roots"
+}
+
+test_teardown_preserves_legacy_untagged_root_without_current_endpoint() {
+  local id task_tmp fake teardown_output status
+  id=$(new_legacy_id td-legacy-preserve)
+  task_tmp="/tmp/fm-$id"
+  LEGACY_TMP_PATHS+=("$task_tmp")
+  mkdir -p "$task_tmp/gotmp"
+  fake=$(make_fake_root "$id" "$task_tmp")
+  mv "$task_tmp/.fm-resource-owner" "$TMP_ROOT/$id.marker"
+  teardown_output=$(PATH="$fake/bin:$PATH" FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "legacy teardown removed an untagged root without a live endpoint proof"
+  [ -d "$task_tmp" ] || fail "legacy teardown removed an unproven task temp root"
+  [ -f "$fake/state/$id.meta" ] || fail "legacy teardown removed metadata after an unproven cleanup"
+  output_contains "$teardown_output" "preserving untagged task temp root" "unproven legacy root preservation is reported"
+  pass "teardown preserves an untagged legacy root when current endpoint ownership is unproven"
 }
 
 test_teardown_skips_gracefully_without_tasktmp() {
@@ -220,7 +241,7 @@ mode=no-mistakes
 yolo=off
 META
   local teardown_output
-  teardown_output=$(FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1) \
+  teardown_output=$(PATH="$fake/bin:$PATH" FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1) \
     || { printf '%s\n' "$teardown_output" >&2; fail "teardown exited non-zero when tasktmp= was absent"; }
   pass "fm-teardown skips gracefully when tasktmp= is absent (backward compat)"
 }
@@ -233,14 +254,14 @@ test_teardown_skips_gracefully_when_dir_missing() {
   [ ! -e "$task_tmp" ] || fail "precondition: task_tmp should not exist yet"
   local fake
   fake=$(make_fake_root "$id" "$task_tmp")
-  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+  PATH="$fake/bin:$PATH" FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero when tasktmp dir was missing"
   [ ! -e "$task_tmp" ] || fail "teardown created/left the tasktmp dir unexpectedly"
   pass "fm-teardown skips gracefully when tasktmp= points to a nonexistent dir"
 }
 
-test_spawn_contract_and_mkdir_pattern
 test_teardown_removes_tasktmp_dir
 test_teardown_removes_supported_legacy_untagged_tasktmp_only
+test_teardown_preserves_legacy_untagged_root_without_current_endpoint
 test_teardown_skips_gracefully_without_tasktmp
 test_teardown_skips_gracefully_when_dir_missing

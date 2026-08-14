@@ -596,6 +596,7 @@ fi
 if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
+  RUN_OUTPUT_SOURCE=run-step
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
@@ -683,7 +684,9 @@ if [ "$HAVE_RUN" = 1 ]; then
   fi
   if [ "$RUN_STATE" = working ] && { log_reports_ci_ready || [ "$ci_status_log_no_ci" = 1 ]; }; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
+      RUN_STATE=done
+      RUN_OUTPUT_SOURCE=status-log
+      RUN_DETAIL="$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -694,9 +697,13 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" = no-ci ]; then
-      emit "no-ci" run-step "no CI checks available: stop waiting for CI"
+      RUN_STATE=no-ci
+      RUN_OUTPUT_SOURCE=run-step
+      RUN_DETAIL="no CI checks available: stop waiting for CI"
     elif [ "$ci_status_log_no_ci" = 0 ] && [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
+      RUN_STATE=done
+      RUN_OUTPUT_SOURCE=status-log
+      RUN_DETAIL="$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi
 
@@ -728,7 +735,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
       ;;
   esac
-  emit "$RUN_STATE" run-step "$RUN_DETAIL"
+  emit "$RUN_STATE" "$RUN_OUTPUT_SOURCE" "$RUN_DETAIL"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------

@@ -169,10 +169,10 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   send-keys)
-    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
-    [ -z "$marker" ] || : > "$marker"
-    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
-    [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+    text=${5:-}
+    case "$text" in
+      *fm-spawn-prelude*|*fm-spawn-launch*) (bash -c "$text") >/dev/null 2>&1 || true ;;
+    esac
     exit 0
     ;;
   has-session|new-session|new-window) exit 0 ;;
@@ -256,10 +256,10 @@ case "${1:-}" in
   new-window) printf '@spawnwid\n'; exit 0 ;;
   list-windows) exit 0 ;;
   send-keys)
-    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
-    [ -z "$marker" ] || : > "$marker"
-    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
-    [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+    text=${5:-}
+    case "$text" in
+      *fm-spawn-prelude*|*fm-spawn-launch*) (bash -c "$text") >/dev/null 2>&1 || true ;;
+    esac
     exit 0
     ;;
   has-session|new-session|send-keys|set-window-option) exit 0 ;;
@@ -402,10 +402,10 @@ case "${1:-}" in
   new-window) printf '%s\n' "@spawnwid"; exit 0 ;;
   list-windows) exit 0 ;;
   send-keys)
-    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
-    [ -z "$marker" ] || : > "$marker"
-    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
-    [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+    text=${5:-}
+    case "$text" in
+      *fm-spawn-prelude*|*fm-spawn-launch*) (bash -c "$text") >/dev/null 2>&1 || true ;;
+    esac
     exit 0
     ;;
   has-session|new-session|set-window-option) exit 0 ;;
@@ -476,10 +476,10 @@ case "${1:-}" in
     ;;
   new-window) printf '@spawnwid\n'; exit 0 ;;
   send-keys)
-    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
-    [ -z "$marker" ] || : > "$marker"
-    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
-    [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+    text=${5:-}
+    case "$text" in
+      *fm-spawn-prelude*|*fm-spawn-launch*) (bash -c "$text") >/dev/null 2>&1 || true ;;
+    esac
     exit 0
     ;;
   list-windows|has-session|new-session|set-window-option) exit 0 ;;

@@ -10,11 +10,16 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-prelude)
-TASK_ID=spawn-prelude-regression-r3
+TASK_ID="spawn-prelude-regression-$(basename "$TMP_ROOT")-$$-${RANDOM:-0}"
 TASK_TMP="/tmp/fm-$TASK_ID"
+TASK_TMP_OWNED=1
+[ ! -e "$TASK_TMP" ] && [ ! -L "$TASK_TMP" ] || {
+  printf 'not ok - refusing pre-existing spawn fixture path %s\n' "$TASK_TMP" >&2
+  exit 1
+}
 
 cleanup_spawn_tmp() {
-  [ -e "$TASK_TMP" ] && find "$TASK_TMP" -depth -delete
+  [ "$TASK_TMP_OWNED" = 1 ] && [ -e "$TASK_TMP" ] && find "$TASK_TMP" -depth -delete
   fm_test_cleanup
 }
 trap cleanup_spawn_tmp EXIT
@@ -22,11 +27,22 @@ trap cleanup_spawn_tmp EXIT
 test_long_prelude_is_submitted_once_before_launch() {
   local home="$TMP_ROOT/home" project="$TMP_ROOT/project" worktree="$TMP_ROOT/worktree"
   local fakebin="$TMP_ROOT/fakebin" log="$TMP_ROOT/tmux.log" pending="$TMP_ROOT/pending"
-  local out status duplicate compose_sends blind_compose prelude_line launch_line
+  local out status duplicate compose_sends blind_compose prelude_line launch_line owner home_abs root_abs home_tag
   fm_git_init_commit "$project"
   git -C "$project" worktree add -q --detach "$worktree"
   mkdir -p "$home/data/$TASK_ID" "$home/state" "$home/config" "$home/projects" "$fakebin"
   printf 'isolated spawn prelude regression\n' > "$home/data/$TASK_ID/brief.md"
+  home_abs=$(cd "$home" && pwd -P)
+  root_abs=$(cd "$ROOT" && pwd -P)
+  owner=$(FM_HOME="$home" FM_ROOT="$ROOT" bash -c '. "$1/bin/fm-resource-lib.sh"; fm_resource_owner_for "$2" "$3" "$4"' _ "$ROOT" "$home_abs" "$root_abs" "$TASK_ID")
+  home_tag=$(FM_HOME="$home" FM_ROOT="$ROOT" bash -c '. "$1/bin/fm-resource-lib.sh"; fm_resource_home_tag_for "$2" "$3"' _ "$ROOT" "$home_abs" "$root_abs")
+  mkdir -p "$TASK_TMP/gotmp"
+  {
+    printf 'version=1\nowner=%s\ntask=%s\nhome=%s\nhome_tag=%s\nroot=%s\nresource=task\n' \
+      "$owner" "$TASK_ID" "$home_abs" "$home_tag" "$root_abs"
+  } > "$TASK_TMP/.fm-resource-owner"
+  printf 'stale-prelude\n' > "$TASK_TMP/.fm-spawn-prelude"
+  printf 'stale-launch\n' > "$TASK_TMP/.fm-spawn-launch"
 
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -61,10 +77,12 @@ case "${1:-}" in
     case "$*" in
       *COMPOSE_PROJECT_NAME*) printf 'pending\n' > "$pending" ;;
     esac
-    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
-    [ -z "$marker" ] || : > "$marker"
-    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
-    [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+    text=${5:-}
+    case "$text" in
+      *fm-spawn-prelude*|*fm-spawn-launch*)
+        (cd "${FM_PRELUDE_WORKTREE:?}" && bash -c "$text") >/dev/null 2>&1 || true
+        ;;
+    esac
     exit 0
     ;;
   capture-pane)
@@ -78,6 +96,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_exit0 "$fakebin" codex
 
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
@@ -87,12 +106,21 @@ SH
     TMUX='fake,1,0' PATH="$fakebin:$PATH" \
     "$SPAWN" "$TASK_ID" "$project" codex 2>&1)
   status=$?
-  [ "$status" -eq 0 ] || fail "verified spawn prelude fixture failed: $out"
+  if [ "$status" -ne 0 ]; then
+    printf '%s\n' "$out" >&2
+    [ ! -f "$log" ] || { printf '%s\n' '--- fake tmux log ---' >&2; cat "$log" >&2; }
+    [ ! -f "$TASK_TMP/.fm-spawn-prelude.sh" ] || { printf '%s\n' '--- prelude script ---' >&2; cat "$TASK_TMP/.fm-spawn-prelude.sh" >&2; }
+    fail "verified spawn prelude fixture failed"
+  fi
 
   duplicate=$(grep -c '^duplicate:' "$log" || true)
   [ "$duplicate" -eq 0 ] || fail "spawn duplicated a pending prelude send ($duplicate marker(s))"
   [ -f "$TASK_TMP/.fm-spawn-prelude" ] || fail "spawn did not observe the shell-side prelude acknowledgement"
   [ -f "$TASK_TMP/.fm-spawn-launch" ] || fail "spawn did not observe the shell-side launch acknowledgement"
+  [ "$(cat "$TASK_TMP/.fm-spawn-prelude")" != stale-prelude ] || fail "spawn accepted a stale prelude acknowledgement"
+  [ "$(cat "$TASK_TMP/.fm-spawn-launch")" != stale-launch ] || fail "spawn accepted a stale launch acknowledgement"
+  case "$(cat "$TASK_TMP/.fm-spawn-prelude")" in prelude:*) ;; *) fail "prelude acknowledgement did not carry the current attempt nonce" ;; esac
+  case "$(cat "$TASK_TMP/.fm-spawn-launch")" in launch:*) ;; *) fail "launch acknowledgement did not carry the current attempt nonce" ;; esac
   [ -f "$TASK_TMP/.fm-spawn-prelude.sh" ] || fail "spawn did not write the task-local prelude script"
   compose_sends=$(grep -c 'COMPOSE_PROJECT_NAME=' "$TASK_TMP/.fm-spawn-prelude.sh" || true)
   [ "$compose_sends" -eq 1 ] || fail "COMPOSE_PROJECT_NAME was not written exactly once to the task-local prelude (count=$compose_sends)"

@@ -26,11 +26,12 @@ set -u
 case "${1:-}" in
   send-keys)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
-    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
-    [ -z "$marker" ] || : > "$marker"
-    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
+    text=${5:-}
+    case "$text" in
+      *fm-spawn-prelude*|*fm-spawn-launch*) (bash -c "$text") >/dev/null 2>&1 || true ;;
+    esac
+    launch_script=$(printf '%s\n' "$text" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
     if [ -n "$launch_script" ] && [ -f "$launch_script" ]; then
-      : > "${launch_script%.sh}"
       tail -n +2 "$launch_script" >> "$FM_FAKE_TMUX_LOG"
     fi
     exit 0

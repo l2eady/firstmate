@@ -754,13 +754,7 @@ case "\${1:-}" in
     for arg in "\$@"; do
       case "\$arg" in
         *.fm-spawn-*)
-          marker=\${arg##*: > }
-          marker=\${marker%%;*}
-          marker=\${marker#"'"}
-          marker=\${marker%"'"}
-          [ -z "\$marker" ] || : > "\$marker"
-          launch_script=\$(printf '%s\\n' "\$arg" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
-          [ -z "\$launch_script" ] || : > "\${launch_script%.sh}"
+          (bash -c "\$arg") >/dev/null 2>&1 || true
           ;;
       esac
     done
@@ -839,13 +833,7 @@ case "\${1:-}" in
     for arg in "\$@"; do
       case "\$arg" in
         *.fm-spawn-*)
-          marker=\${arg##*: > }
-          marker=\${marker%%;*}
-          marker=\${marker#"'"}
-          marker=\${marker%"'"}
-          [ -z "\$marker" ] || : > "\$marker"
-          launch_script=\$(printf '%s\\n' "\$arg" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
-          [ -z "\$launch_script" ] || : > "\${launch_script%.sh}"
+          (bash -c "\$arg") >/dev/null 2>&1 || true
           ;;
       esac
     done
@@ -939,7 +927,7 @@ run_teardown_case() {
 
 test_teardown_conformance_old_vs_new() {
   local old_bin fb proj wt id
-  local state_old state_new config_old config_new data log_old log_new out_old out_new rc_old rc_new
+  local state_old state_new config_old config_new data log_old log_new expected_new out_old out_new rc_old rc_new
   old_bin=$(build_old_bin teardown-old)
   proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
   id="teardownconform1"
@@ -968,14 +956,19 @@ test_teardown_conformance_old_vs_new() {
 
   expect_code 0 "$rc_old" "old fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_old"
   expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/teardown-diff.txt" 2>&1 \
-    || fail "fm-teardown.sh: tmux+treehouse command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/teardown-diff.txt")"
+  expected_new="$TMP_ROOT/teardown-expected.log"
+  {
+    printf 'tmux\x1fdisplay-message\x1f-p\x1f-t\x1ffirstmate:fm-%s\x1f#{pane_current_command}\n' "$id"
+    cat "$log_old"
+  } > "$expected_new"
+  diff -u "$expected_new" "$log_new" > "$TMP_ROOT/teardown-diff.txt" 2>&1 \
+    || fail "fm-teardown.sh: legacy liveness proof changed the expected command order"$'\n'"$(cat "$TMP_ROOT/teardown-diff.txt")"
   assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
     "teardown did not call treehouse return --force <worktree>"
   assert_contains "$(cat "$log_new")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"firstmate:fm-$id" \
     "teardown did not call tmux kill-window -t <window>"
 
-  pass "fm-teardown.sh: treehouse return + tmux kill-window command log is byte-identical old vs new for a scout task"
+  pass "fm-teardown.sh: legacy liveness proof precedes the unchanged treehouse return + tmux kill"
 }
 
 # --- backend selection loudly refuses an unknown backend --------------------

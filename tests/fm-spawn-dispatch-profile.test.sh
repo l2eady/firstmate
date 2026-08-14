@@ -31,11 +31,13 @@ case "${1:-}" in
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
-          marker=$(printf '%s\n' "$a" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
-          [ -z "$marker" ] || : > "$marker"
+          case "$a" in
+            *fm-spawn-prelude*|*fm-spawn-launch*)
+              (bash -c "$a") >/dev/null 2>&1 || true
+              ;;
+          esac
           launch_script=$(printf '%s\n' "$a" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
           if [ -n "$launch_script" ] && [ -f "$launch_script" ]; then
-            : > "${launch_script%.sh}"
             tail -n +2 "$launch_script" >> "$FM_FAKE_LAUNCH_LOG"
           fi
         fi

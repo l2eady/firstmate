@@ -149,10 +149,13 @@ RESOURCE_HOME=$(grep '^resource_home=' "$META" | cut -d= -f2- || true)
 RESOURCE_ROOT=$(grep '^resource_root=' "$META" | cut -d= -f2- || true)
 # Tasks spawned before resource manifests existed recorded only tasktmp=. The
 # resource library may use its narrow legacy compatibility proof for those
-# metas; modern manifests and marked roots still take the normal fail-closed
-# path.
+# metas, but only after this teardown proves that the recorded task endpoint was
+# live before its scoped kill and gone afterward. Modern manifests and marked
+# roots still take the normal fail-closed path.
 ALLOW_LEGACY_TASK_TMP=0
-[ -n "$RESOURCE_MANIFEST" ] || ALLOW_LEGACY_TASK_TMP=1
+LEGACY_TASK_TMP_REQUESTED=0
+[ -n "$RESOURCE_MANIFEST" ] || LEGACY_TASK_TMP_REQUESTED=1
+LEGACY_ENDPOINT_WAS_LIVE=0
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
 
@@ -160,6 +163,26 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+
+legacy_endpoint_is_live() {
+  [ "$LEGACY_TASK_TMP_REQUESTED" = 1 ] || return 1
+  [ -n "$T" ] || return 1
+  [ "$(fm_backend_agent_alive "$BACKEND" "$T" 2>/dev/null || true)" = alive ] || return 1
+  fm_backend_target_exists "$BACKEND" "$T" "fm-$ID" >/dev/null 2>&1
+}
+
+legacy_endpoint_is_gone() {
+  local retries=${FM_TEARDOWN_LEGACY_ENDPOINT_RETRIES:-3} delay=${FM_TEARDOWN_LEGACY_ENDPOINT_DELAY_SECS:-0.1} attempt=0
+  case "$retries" in ''|*[!0-9]*) retries=3 ;; esac
+  while :; do
+    if ! fm_backend_target_exists "$BACKEND" "$T" "fm-$ID" >/dev/null 2>&1; then
+      return 0
+    fi
+    [ "$attempt" -lt "$retries" ] || return 1
+    attempt=$((attempt + 1))
+    sleep "$delay"
+  done
+}
 
 default_branch() {
   local ref branch
@@ -1099,6 +1122,10 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+if legacy_endpoint_is_live; then
+  LEGACY_ENDPOINT_WAS_LIVE=1
+fi
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -1141,6 +1168,13 @@ fi
 
 if [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+fi
+if [ "$LEGACY_ENDPOINT_WAS_LIVE" = 1 ]; then
+  if legacy_endpoint_is_gone; then
+    ALLOW_LEGACY_TASK_TMP=1
+  else
+    echo "resource: preserving legacy task temp root $TASK_TMP because the recorded endpoint was not proven gone after scoped teardown" >&2
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT

@@ -1161,13 +1161,28 @@ spawn_send_text_submit() {  # <target> <text>
       ;;
   esac
 }
-spawn_wait_for_file() {  # <path> <description>
-  local path=$1 description=$2
+spawn_reset_ack() {  # <path>
+  local path=$1
+  [ ! -L "$path" ] || {
+    echo "error: spawn acknowledgement path is a symbolic link: $path" >&2
+    return 1
+  }
+  [ ! -e "$path" ] || [ -f "$path" ] || {
+    echo "error: spawn acknowledgement path is not a regular file: $path" >&2
+    return 1
+  }
+  rm -f -- "$path"
+}
+spawn_wait_for_ack() {  # <path> <expected-content> <description>
+  local path=$1 expected=$2 description=$3 observed
   for _ in $(seq 1 30); do
-    [ -f "$path" ] && return 0
+    if [ -f "$path" ] && [ ! -L "$path" ]; then
+      observed=$(sed -n '1p' "$path" 2>/dev/null || true)
+      [ "$observed" = "$expected" ] && return 0
+    fi
     sleep 0.1
   done
-  echo "error: spawn did not observe $description acknowledgement at $path" >&2
+  echo "error: spawn did not observe current $description acknowledgement at $path" >&2
   return 1
 }
 spawn_write_script() {  # <path> <body>
@@ -1459,26 +1474,33 @@ fi
 # line cannot remain partly buffered or be duplicated around COMPOSE_PROJECT_NAME.
 # The shared submit primitive still types that short command once, retries Enter
 # only, and never appends the launch while the input is still positively pending.
+SPAWN_ATTEMPT="$(date +%s 2>/dev/null || printf '0').$$.${RANDOM:-0}"
 PRELUDE_MARKER="$TASK_TMP/.fm-spawn-prelude"
 PRELUDE_MARKER_Q=$(shell_quote "$PRELUDE_MARKER")
 PRELUDE_SCRIPT="$TASK_TMP/.fm-spawn-prelude.sh"
 PRELUDE_SCRIPT_Q=$(shell_quote "$PRELUDE_SCRIPT")
+PRELUDE_ACK="prelude:$SPAWN_ATTEMPT"
+PRELUDE_ACK_Q=$(shell_quote "$PRELUDE_ACK")
+LAUNCH_MARKER="$TASK_TMP/.fm-spawn-launch"
+LAUNCH_MARKER_Q=$(shell_quote "$LAUNCH_MARKER")
+LAUNCH_SCRIPT="$TASK_TMP/.fm-spawn-launch.sh"
+LAUNCH_SCRIPT_Q=$(shell_quote "$LAUNCH_SCRIPT")
+LAUNCH_ACK="launch:$SPAWN_ATTEMPT"
+LAUNCH_ACK_Q=$(shell_quote "$LAUNCH_ACK")
+spawn_reset_ack "$PRELUDE_MARKER" || exit 1
+spawn_reset_ack "$LAUNCH_MARKER" || exit 1
 PRELUDE_BODY=$(printf 'export GOTMPDIR=%s\n%s' "$(shell_quote "$TASK_TMP/gotmp")" "$RESOURCE_ENV")
 spawn_write_script "$PRELUDE_SCRIPT" "$PRELUDE_BODY" || exit 1
-spawn_send_text_submit "$T" ". $PRELUDE_SCRIPT_Q && : > $PRELUDE_MARKER_Q"
-spawn_wait_for_file "$PRELUDE_MARKER" "resource prelude" || exit 1
+spawn_send_text_submit "$T" ". $PRELUDE_SCRIPT_Q && printf '%s\\n' $PRELUDE_ACK_Q > $PRELUDE_MARKER_Q"
+spawn_wait_for_ack "$PRELUDE_MARKER" "$PRELUDE_ACK" "resource prelude" || exit 1
 
 # A shell-side acknowledgement closes the remaining fresh-pane ambiguity: an
 # inconclusive composer read on a bare shell is acceptable only after the shell
 # itself proved that the prelude executed. The marker is inside the task-owned
 # temp root and disappears with normal resource cleanup.
-LAUNCH_MARKER="$TASK_TMP/.fm-spawn-launch"
-LAUNCH_MARKER_Q=$(shell_quote "$LAUNCH_MARKER")
-LAUNCH_SCRIPT="$TASK_TMP/.fm-spawn-launch.sh"
-LAUNCH_SCRIPT_Q=$(shell_quote "$LAUNCH_SCRIPT")
-LAUNCH_BODY=$(printf ': > %s\n%s' "$LAUNCH_MARKER_Q" "$LAUNCH")
+LAUNCH_BODY=$(printf 'printf "%%s\\n" %s > %s\n%s' "$LAUNCH_ACK_Q" "$LAUNCH_MARKER_Q" "$LAUNCH")
 spawn_write_script "$LAUNCH_SCRIPT" "$LAUNCH_BODY" || exit 1
 spawn_send_text_submit "$T" ". $LAUNCH_SCRIPT_Q"
-spawn_wait_for_file "$LAUNCH_MARKER" "launch" || exit 1
+spawn_wait_for_ack "$LAUNCH_MARKER" "$LAUNCH_ACK" "launch" || exit 1
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
