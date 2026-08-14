@@ -108,12 +108,46 @@ else
   stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }
 fi
 
-POLL=${FM_POLL:-15}                   # seconds between cycles
+# Cadence tunables are sanitized at the point they are read, because both feed
+# arithmetic further down and a stray token in arithmetic under `set -u` aborts
+# the shell - the hazard the stat note above describes, here applied to a
+# mistyped operator override rather than a portability quirk. Killing the
+# supervision backbone at startup over a typo is worse than the documented
+# default, and zero stays a legal value.
+#
+# Both values are spent on `sleep`, which takes a fractional seconds argument,
+# so a nonnegative DECIMAL (FM_POLL=0.2 for a tight test or debug cadence) is a
+# legal override and must survive intact - rejecting it would silently stretch
+# the cycle to the 15s default. Only the derived window below needs an integer,
+# so it takes a ceiling of the sanitized value instead of constraining what the
+# operator may set.
+cadence_or_default() {  # <value> <default> -> nonnegative decimal seconds
+  case "$1" in
+    ''|.|*[!0-9.]*|*.*.*) printf '%s' "$2" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+cadence_ceiling() {  # <nonnegative decimal seconds> -> whole seconds, rounded up
+  local whole frac
+  case "$1" in
+    *.*)
+      whole=${1%%.*}; frac=${1#*.}
+      case "$frac" in
+        *[1-9]*) printf '%s' "$(( ${whole:-0} + 1 ))" ;;
+        *) printf '%s' "${whole:-0}" ;;
+      esac ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+POLL=$(cadence_or_default "${FM_POLL:-15}" 15)   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
-SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
+SIGNAL_GRACE=$(cadence_or_default "${FM_SIGNAL_GRACE:-30}" 30)
+                                      # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
@@ -378,6 +412,115 @@ surface_nonterminal_stale() {  # <window> <hash>
   wake "stale: $win"
 }
 
+# Endpoint liveness. The stale layer needs a readable pane to hash, so a crew
+# whose endpoint DIES is invisible to it: the harness turn-end hook never runs,
+# so no status line and no turn-end marker are ever written again, no signal wake
+# fires, and the heartbeat backstop only scans captain-relevant statuses. Such a
+# task would sit in flight forever with nothing escalated. The per-poll loop
+# below already holds the recorded endpoint and knows the probe failed, so that
+# is where the condition is caught.
+#
+# A single failed probe is not proof (a backend CLI timeout, or an unreachable
+# tmux server failing every task at once), so it takes ENDPOINT_MISS_POLLS
+# consecutive misses. It then surfaces ONCE per episode as a per-task poll -
+# exactly what the `check:` vocabulary already means ("print only when firstmate
+# should wake"), so no new wake kind is needed and both supervisors route it
+# through their existing check handling. A successful capture clears both
+# markers, so a recovered endpoint re-arms.
+#
+# The verdict stays deliberately per task. A shared backend outage does fail
+# every probe at once, and inferring that from the misses would collapse those
+# lines into one - but the same shape is also several endpoints genuinely dying,
+# and guessing wrong there suppresses a real orphan, which is the failure this
+# whole check exists to break. One deduplicated actionable item per affected task
+# is the fail-safe reading, so the misses are reported as what was actually
+# observed and the fleet-wide pattern is left for firstmate to recognise across
+# the batch.
+ENDPOINT_MISS_POLLS=${FM_ENDPOINT_MISS_POLLS:-2}
+case "$ENDPOINT_MISS_POLLS" in ''|*[!0-9]*) ENDPOINT_MISS_POLLS=2 ;; esac
+# How recent the previous miss must be to still count as the same run. A count
+# with no recency check would let one transient blip sit for hours and pair with
+# an unrelated later one to "confirm" a loss for a crew that is alive, so each
+# miss records when it happened. The window is measured in whole CYCLES, not
+# polls: two consecutive probes of the same window are a full cycle apart, and a
+# cycle carrying a signal spends SIGNAL_GRACE lingering plus POLL sleeping - with
+# the away-mode daemon's wake handling and watcher restart on top of that. A
+# gap of a few polls would expire mid-run on any signalling fleet, so a dead
+# endpoint would restart its run on every pass and never confirm. A confirmed
+# loss also wakes and exits from inside the liveness pass, leaving every later
+# window unprobed that cycle, which the same several-cycle span absorbs. The
+# cadences are rounded UP to whole seconds here: this window is integer
+# arithmetic, and a sub-second cadence must widen the window rather than
+# truncate to a zero-length cycle.
+ENDPOINT_MISS_GAP_DEFAULT=$(( $(cadence_ceiling "$POLL") + $(cadence_ceiling "$SIGNAL_GRACE") ))
+ENDPOINT_MISS_GAP_DEFAULT=$(( ENDPOINT_MISS_GAP_DEFAULT * 3 ))
+[ "$ENDPOINT_MISS_GAP_DEFAULT" -ge 3 ] || ENDPOINT_MISS_GAP_DEFAULT=3
+ENDPOINT_MISS_GAP=${FM_ENDPOINT_MISS_GAP:-$ENDPOINT_MISS_GAP_DEFAULT}
+case "$ENDPOINT_MISS_GAP" in ''|*[!0-9]*) ENDPOINT_MISS_GAP=$ENDPOINT_MISS_GAP_DEFAULT ;; esac
+[ "$ENDPOINT_MISS_GAP" -ge 3 ] || ENDPOINT_MISS_GAP=3
+
+endpoint_miss_clear() {  # <window>
+  local key
+  key=$(printf '%s' "$1" | tr ':/.' '___')
+  rm -f "$STATE/.endpoint-miss-$key" "$STATE/.endpoint-surfaced-$key"
+}
+
+endpoint_miss_record() {  # <window> <task> [last-status-line] [kind]
+  local win=$1 task=$2 last=${3:-} kind=${4:-} key n prev prev_at now reason recovery
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  now=$(date +%s)
+  n=0
+  if [ -r "$STATE/.endpoint-miss-$key" ]; then
+    read -r prev prev_at < "$STATE/.endpoint-miss-$key" || true
+    case "${prev:-}" in ''|*[!0-9]*) prev=0 ;; esac
+    case "${prev_at:-}" in ''|*[!0-9]*) prev_at=0 ;; esac
+    [ "$(( now - prev_at ))" -le "$ENDPOINT_MISS_GAP" ] && n=$prev
+  fi
+  n=$(( n + 1 ))
+  printf '%s %s' "$n" "$now" > "$STATE/.endpoint-miss-$key"
+  [ "$n" -ge "$ENDPOINT_MISS_POLLS" ] || return 0
+  [ -e "$STATE/.endpoint-surfaced-$key" ] && return 0
+  recovery=$(endpoint_recovery_advice "$kind")
+  # Carry what the task last reported. A crew that already reported done and is
+  # waiting on a merge has a legitimately closed endpoint, and away mode acts on
+  # this digest line itself rather than on any operator prose, so a bare relaunch
+  # instruction would be the wrong call for it.
+  reason="check: endpoint $win: task ${task:-unknown} endpoint unreadable for $n consecutive polls; last reported: ${last:-no status}; recommended recovery: $recovery"
+  # Enqueue BEFORE suppressing, the same ordering every other wake site here
+  # uses. A dead endpoint never produces the successful capture that would clear
+  # this marker, so writing it ahead of a failed append would suppress the
+  # orphan permanently - the exact silence this check exists to break.
+  fm_wake_append check "endpoint-$key" "$reason" || exit 1
+  : > "$STATE/.endpoint-surfaced-$key"
+  wake "$reason"
+}
+
+# This poll's endpoint probe, kept so the stale layer below can reuse the capture
+# the liveness pass already took: probing earlier must not double the per-poll
+# round trips. Parallel indexed arrays keep this portable to the same bash the
+# rest of bin/ targets, and a fleet is a handful of windows, so the scan is short.
+ENDPOINT_WINS=()
+ENDPOINT_TAILS=()
+ENDPOINT_PROBED=0
+
+endpoint_cache_put() {  # <window> <capture>
+  ENDPOINT_WINS[ENDPOINT_PROBED]=$1
+  ENDPOINT_TAILS[ENDPOINT_PROBED]=$2
+  ENDPOINT_PROBED=$(( ENDPOINT_PROBED + 1 ))
+}
+
+endpoint_cache_get() {  # <window>; prints this poll's capture, non-zero if unreadable
+  local i=0
+  while [ "$i" -lt "$ENDPOINT_PROBED" ]; do
+    if [ "${ENDPOINT_WINS[$i]}" = "$1" ]; then
+      printf '%s' "${ENDPOINT_TAILS[$i]}"
+      return 0
+    fi
+    i=$(( i + 1 ))
+  done
+  return 1
+}
+
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
@@ -488,6 +631,26 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # Endpoint liveness, evaluated BEFORE the signal scan for the same reason the
+  # slow checks below are: wake() exits the cycle, so a probe placed after the
+  # scan is skipped on every poll a chatty sibling crewmate signals, and under
+  # afk every signal wakes. A crew whose endpoint died can never signal again, so
+  # it would only be probed on the polls its siblings happened to stay quiet, and
+  # ENDPOINT_MISS_GAP would expire the run between them - the loss could go
+  # unconfirmed indefinitely, which is exactly the orphan this check exists to
+  # break. Each capture is cached for the stale layer, so the pane is still read
+  # once per window per poll and the ordinary hash work stays where it was.
+  ENDPOINT_PROBED=0
+  while IFS= read -r w; do
+    if tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      endpoint_cache_put "$w" "$tail40"
+      endpoint_miss_clear "$w"
+    else
+      task=$(window_to_task "$w" "$STATE")
+      endpoint_miss_record "$w" "$task" "$(last_status_line "$STATE/$task.status")" "$(window_kind "$w")"
+    fi
+  done < <(recorded_windows)
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -580,10 +743,17 @@ EOF
     if ! status_is_paused "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
+    # A window with no cached capture had an unreadable endpoint this poll: the
+    # prepass already counted the miss, and there is no pane to hash. That pass
+    # deliberately runs ahead of the secondmate skip below, because that skip
+    # exists for an idle secondmate PANE being healthy, which is a different
+    # condition from a DEAD endpoint - a secondmate whose endpoint dies takes its
+    # whole subtree unsupervised, and the only other detector is the
+    # session-start liveness sweep, which a long away-mode stretch never reaches.
+    tail40=$(endpoint_cache_get "$w") || continue
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

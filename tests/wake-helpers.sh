@@ -74,6 +74,21 @@ if [ "${1:-}" = "list-windows" ]; then
   exit 0
 fi
 if [ "${1:-}" = "capture-pane" ]; then
+  # FM_FAKE_TMUX_CAPTURE_FAIL models an UNREADABLE endpoint (a dead pane, a
+  # killed session, an unreachable server) as distinct from a readable pane whose
+  # content happens to be empty. Only a non-zero capture exit is endpoint loss.
+  # FM_FAKE_TMUX_CAPTURE_FAIL_TARGETS is the per-target form (space-separated
+  # targets), so a test can lose ONE endpoint while the rest of the fleet stays
+  # readable - the case that distinguishes a dead pane from a backend outage.
+  if [ -n "${FM_FAKE_TMUX_CAPTURE_FAIL_TARGETS:-}" ]; then
+    _t=""; _prev=""
+    for _a in "$@"; do
+      [ "$_prev" = "-t" ] && _t="$_a"
+      _prev="$_a"
+    done
+    case " $FM_FAKE_TMUX_CAPTURE_FAIL_TARGETS " in *" $_t "*) exit 1 ;; esac
+  fi
+  [ -n "${FM_FAKE_TMUX_CAPTURE_FAIL:-}" ] && exit 1
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
   fi
@@ -100,6 +115,7 @@ make_fake_crew_state() {  # <fakebin>
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = --reconcile ]; then shift; fi
 id=${1:-}
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
@@ -134,6 +150,10 @@ case "${1:-}" in
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
   capture-pane)
+    # FM_FAKE_TMUX_CAPTURE_FAIL models an UNREADABLE endpoint (a dead pane, a
+    # killed session, an unreachable server) as distinct from a readable pane
+    # whose content happens to be empty. Only a non-zero exit is endpoint loss.
+    [ -n "${FM_FAKE_TMUX_CAPTURE_FAIL:-}" ] && exit 1
     # Honor a single-line band capture (-S N -E M, both non-negative) the way the
     # composer reader now bounds its capture to the cursor row; otherwise (e.g.
     # fm_pane_is_busy's "-S -40" tail) return the whole capture. -e is accepted and

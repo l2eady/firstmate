@@ -118,10 +118,32 @@ make_fake_fleet_sync_root() {
 [ -z "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] || : > "$FM_FAKE_FLEET_SYNC_STARTED_MARKER"
 printf '%s\n' 'alpha: synced'
 printf '%s\n' 'beta: skipped: no origin remote'
+# Both partial lines are now on disk. The runner's fake clock waits for this
+# marker before it may advance, so the timeout can never race the child's
+# output and turn a partial-output assertion into a scheduling coin flip.
+[ -z "${FM_FAKE_FLEET_SYNC_OUTPUT_MARKER:-}" ] || : > "$FM_FAKE_FLEET_SYNC_OUTPUT_MARKER"
 exec perl -e 'sleep 300'
 SH
   chmod +x "$fake_root/bin/fm-fleet-sync.sh"
   printf '%s\n' "$fake_root"
+}
+
+# The relayed timeout line reports the clock the wait loop actually observed.
+# The fake clock advances one fake second per poll PLUS whatever real time the
+# case spent (SECONDS keeps running between assignments), so a scheduling hiccup
+# legitimately reports the timeout or a second past it. The contract worth
+# pinning is the computed timeout and the fact that the loop reached it, never an
+# exact elapsed value.
+assert_timed_out_at() {  # <output> <timeout> <label>
+  local out=$1 timeout=$2 label=$3 line elapsed
+  line=$(printf '%s\n' "$out" \
+    | grep -F "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=${timeout}s elapsed=" | head -1)
+  [ -n "$line" ] || fail "$label: no timeout=${timeout}s report in: $out"
+  elapsed=${line##*elapsed=}
+  elapsed=${elapsed%s)}
+  case "$elapsed" in ''|*[!0-9]*) fail "$label: unparseable elapsed in '$line'" ;; esac
+  [ "$elapsed" -ge "$timeout" ] \
+    || fail "$label: reported elapsed=${elapsed}s before its own ${timeout}s timeout"
 }
 
 add_origin_backed_projects() {
@@ -148,16 +170,30 @@ add_no_origin_projects() {
 }
 
 run_bootstrap_timeout_case() {
-  local home=$1 fake_root=$2 fakebin=$3 override started_marker git_record wait_for_marker
+  local home=$1 fake_root=$2 fakebin=$3 override started_marker git_record wait_for_marker output_marker
   override=__unset__
   started_marker=${5:-}
   git_record=${6:-}
   wait_for_marker=${7:-0}
   [ "$#" -lt 4 ] || override=$4
+  # Every timeout case asserts on the fleet-sync output bootstrap relays when it
+  # gives up, so the fake clock must not be allowed to reach the timeout before
+  # the fake child has written that output.
+  output_marker="$home.fleet-output-marker"
+  rm -f "$output_marker"
   (
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     sleep() {
-      local inc=${1:-1}
+      local inc=${1:-1} tries
+      # Hold the fake clock until the child's partial output exists (bounded, so
+      # a genuinely broken child still fails the case rather than hanging).
+      if [ -n "${FM_FAKE_FLEET_SYNC_OUTPUT_MARKER:-}" ]; then
+        tries=0
+        while [ "$tries" -lt 500 ] && [ ! -e "$FM_FAKE_FLEET_SYNC_OUTPUT_MARKER" ]; do
+          command sleep 0.01
+          tries=$((tries + 1))
+        done
+      fi
       SECONDS=$((SECONDS + inc))
       if [ "${FM_FAKE_SLEEP_YIELDS:-0}" -lt 5 ]; then
         FM_FAKE_SLEEP_YIELDS=$((${FM_FAKE_SLEEP_YIELDS:-0} + 1))
@@ -184,6 +220,7 @@ run_bootstrap_timeout_case() {
     if [ "$override" = __unset__ ]; then
       PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
         FM_FAKE_FLEET_SYNC_STARTED_MARKER="$started_marker" \
+        FM_FAKE_FLEET_SYNC_OUTPUT_MARKER="$output_marker" \
         FM_FAKE_GIT_SYNC_STARTED_RECORD="$git_record" \
         FM_FAKE_GIT_WAIT_FOR_FLEET_START="$wait_for_marker" \
         FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
@@ -191,6 +228,7 @@ run_bootstrap_timeout_case() {
       PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
         FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT="$override" \
         FM_FAKE_FLEET_SYNC_STARTED_MARKER="$started_marker" \
+        FM_FAKE_FLEET_SYNC_OUTPUT_MARKER="$output_marker" \
         FM_FAKE_GIT_SYNC_STARTED_RECORD="$git_record" \
         FM_FAKE_GIT_WAIT_FOR_FLEET_START="$wait_for_marker" \
         FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
@@ -351,7 +389,7 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
 }
 
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
-  local case_dir home fakebin fake_root out expected
+  local case_dir home fakebin fake_root out partial_at timeout_at
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
   home="$case_dir/home"
   mkdir -p "$home/config"
@@ -363,8 +401,13 @@ test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin")
 
-  expected=$'FLEET_SYNC: alpha: synced\nFLEET_SYNC: beta: skipped: no origin remote\nFLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=59s elapsed=59s)'
-  assert_contains "$out" "$expected" "bootstrap timeout should scale to 59s for 18 origin-backed projects and relay partial output first"
+  assert_contains "$out" "FLEET_SYNC: alpha: synced" "a timed-out refresh must still relay the work it finished"
+  assert_contains "$out" "FLEET_SYNC: beta: skipped: no origin remote" "a timed-out refresh must relay every partial line, unfiltered"
+  assert_timed_out_at "$out" 59 "bootstrap timeout should scale to 59s for 18 origin-backed projects"
+  partial_at=$(printf '%s\n' "$out" | grep -nF 'FLEET_SYNC: beta: skipped: no origin remote' | head -1 | cut -d: -f1)
+  timeout_at=$(printf '%s\n' "$out" | grep -nF 'bootstrap refresh timed out' | head -1 | cut -d: -f1)
+  [ -n "$partial_at" ] && [ -n "$timeout_at" ] && [ "$partial_at" -lt "$timeout_at" ] \
+    || fail "partial fleet-sync output must be relayed before the timeout line: $out"
   pass "bootstrap computes a fleet-size-aware default timeout and preserves partial fleet-sync output"
 }
 
@@ -380,7 +423,7 @@ test_fleet_sync_timeout_floor_preserves_small_fleets() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin")
 
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=20s elapsed=20s)" "small fleets should keep the 20s timeout floor"
+  assert_timed_out_at "$out" 20 "small fleets should keep the 20s timeout floor"
   pass "bootstrap keeps the quick 20s default for small fleets"
 }
 
@@ -396,7 +439,7 @@ test_fleet_sync_timeout_explicit_override_wins() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" 7)
 
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=7s elapsed=7s)" "explicit timeout override should still win over computed default"
+  assert_timed_out_at "$out" 7 "explicit timeout override should still win over computed default"
   assert_not_contains "$out" "timeout=59s" "explicit override should not be replaced by the computed timeout"
   pass "bootstrap preserves FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT as an explicit override"
 }
@@ -413,7 +456,7 @@ test_fleet_sync_timeout_empty_override_uses_default() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" "")
 
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=59s elapsed=59s)" "blank timeout env should behave like an unset override"
+  assert_timed_out_at "$out" 59 "blank timeout env should behave like an unset override"
   assert_not_contains "$out" "timeout=20s" "blank timeout env should not force the legacy floor on a large fleet"
   pass "bootstrap treats a blank timeout override as unset"
 }
@@ -433,7 +476,7 @@ test_fleet_sync_timeout_is_computed_before_launch() {
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" __unset__ "$started_marker" "$git_record" 1)
 
   [ ! -s "$git_record" ] || fail "fleet sync launched before timeout scan finished: $(tr '\n' ';' < "$git_record")"
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=20s elapsed=20s)" "launch-order case should still enforce the computed timeout"
+  assert_timed_out_at "$out" 20 "launch-order case should still enforce the computed timeout"
   pass "bootstrap computes the timeout before launching fleet sync"
 }
 

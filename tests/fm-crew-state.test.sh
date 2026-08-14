@@ -81,6 +81,12 @@ SH
 set -u
 case "${1:-}" in
   display-message)
+    # FM_FAKE_TMUX_FLAKY_PROBE names a file: while it exists the probe fails and
+    # the file is consumed, so the FIRST probe misses and the next succeeds -
+    # the transient backend round-trip failure, not a dead endpoint.
+    if [ -n "${FM_FAKE_TMUX_FLAKY_PROBE:-}" ] && [ -e "$FM_FAKE_TMUX_FLAKY_PROBE" ]; then
+      rm -f "$FM_FAKE_TMUX_FLAKY_PROBE"; exit 1
+    fi
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     printf '%%1\n' ;;
   capture-pane)
@@ -158,6 +164,10 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+}
+
+run_crew_reconcile() {  # <case-dir> <id>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" --reconcile "$2"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -1073,6 +1083,77 @@ test_dead_window_still_reports_active_run_step() {
   pass "closed pane still reports an active run-step"
 }
 
+# The default read keeps the run-step authoritative, while reconciliation makes
+# endpoint loss the prompt recovery fact. The shared signal classifier must
+# surface that recovery even though the underlying pipeline still reports working.
+test_reconcile_active_run_with_dead_endpoint_is_actionable() {
+  reset_fakes
+  local d state_file out decision
+  d=$(new_case dead-window-active-reconcile)
+  make_repo_on_branch "$d/wt" fm/feat-dead-reconcile
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dead-reconcile.meta" \
+    "window=fm:fm-feat-dead-reconcile" "worktree=$d/wt" "kind=ship"
+  state_file="$d/state/feat-dead-reconcile.turn-ended"
+  : > "$state_file"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-dead-reconcile)"
+  FM_FAKE_TMUX_MISSING=1
+
+  out=$(run_crew_state "$d" feat-dead-reconcile)
+  assert_contains "$out" "state: working" "default read preserves active run-step authority"
+  assert_not_contains "$out" "endpoint:" "default read does not change its output contract"
+
+  out=$(run_crew_reconcile "$d" feat-dead-reconcile)
+  assert_contains "$out" "state: unknown" "reconciliation prioritizes the independently lost endpoint"
+  assert_contains "$out" "endpoint: gone" "reconciliation reports the independently lost endpoint"
+
+  decision=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    signal_crew_reconciliation "$d/state" "$state_file")
+  case "$decision" in actionable\|*) ;; *) fail "dead endpoint with an active run was absorbed: $decision" ;; esac
+  assert_contains "$decision" "task feat-dead-reconcile" "recovery detail carries the task id"
+  assert_contains "$decision" "recommended recovery:" "recovery detail carries the next action"
+  pass "turn-end reconciliation surfaces a dead endpoint even while its run-step remains active"
+}
+
+# A transient probe failure must not be reported as a lost endpoint: for every
+# non-tmux backend the probe is a CLI or socket round trip, and an unreachable
+# tmux server fails every task at once. Acting on a false "endpoint gone" means
+# relaunching a crew whose pipeline is still running.
+test_reconcile_transient_probe_failure_is_not_endpoint_loss() {
+  reset_fakes
+  local d out flaky
+  d=$(new_case transient-probe)
+  make_repo_on_branch "$d/wt" fm/feat-flaky
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-flaky.meta" \
+    "window=fm:fm-feat-flaky" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-flaky)"
+  flaky="$d/flaky-probe"
+  : > "$flaky"
+
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_FAKE_TMUX_FLAKY_PROBE="$flaky" FM_CREW_STATE_ENDPOINT_RETRY_DELAY=0 \
+    "$CREW_STATE" --reconcile feat-flaky)
+  assert_not_contains "$out" "endpoint: gone" "one transient probe miss was reported as a lost endpoint"
+  assert_contains "$out" "endpoint: alive" "the confirming re-probe was not reflected"
+  assert_contains "$out" "state: working" "a transient probe miss masked the active run-step"
+  [ ! -e "$flaky" ] || fail "the flaky probe fixture was never consumed, so no re-probe happened"
+
+  # A genuinely dead endpoint still fails every attempt and is still reported.
+  reset_fakes
+  d=$(new_case persistent-probe-loss)
+  make_repo_on_branch "$d/wt" fm/feat-dead-persistent
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dead-persistent.meta" \
+    "window=fm:fm-feat-dead-persistent" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-dead-persistent)"
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_FAKE_TMUX_MISSING=1 FM_CREW_STATE_ENDPOINT_RETRY_DELAY=0 \
+    "$CREW_STATE" --reconcile feat-dead-persistent)
+  assert_contains "$out" "endpoint: gone" "a persistently unreadable endpoint was no longer reported as gone"
+  pass "reconciliation confirms endpoint loss with a re-probe instead of trusting one failed probe"
+}
+
 test_no_timeout_uses_perl_bound() {
   reset_fakes
   local d toolbin out start elapsed calls_file calls
@@ -1235,6 +1316,8 @@ test_no_run_idle_pane_custom_paused_verb
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
+test_reconcile_active_run_with_dead_endpoint_is_actionable
+test_reconcile_transient_probe_failure_is_not_endpoint_loss
 test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree

@@ -17,6 +17,16 @@
 #
 #   state: <working|parked|done|no-ci|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
+# Internal supervisors use `fm-crew-state.sh --reconcile <id>` for turn-end and
+# stale-wake decisions. That mode probes the endpoint first, returns immediately
+# when it is gone or unrecorded, and appends `endpoint: alive` to the normal
+# bounded state read otherwise. Endpoint loss therefore cannot hide behind a
+# still-active run record. Loss is only concluded after a bounded re-probe
+# (FM_CREW_STATE_ENDPOINT_RETRIES / FM_CREW_STATE_ENDPOINT_RETRY_DELAY), so a
+# transient backend round-trip failure does not recommend relaunching a live
+# crew. The default command and output remain unchanged for normal operator
+# reads.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch, active or terminal
@@ -54,8 +64,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 
+RECONCILE_ENDPOINT=0
+if [ "${1:-}" = --reconcile ]; then
+  RECONCILE_ENDPOINT=1
+  shift
+fi
 ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+[ -n "$ID" ] || { echo "usage: fm-crew-state.sh [--reconcile] <id>" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -72,11 +87,14 @@ case "$NM_CI_NO_CHECKS_GRACE_SECS" in ''|*[!0-9]*) NM_CI_NO_CHECKS_GRACE_SECS=3 
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
+ENDPOINT_DETAIL=""
+[ "$RECONCILE_ENDPOINT" = 1 ] && ENDPOINT_DETAIL='endpoint: unknown'
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
+  [ -n "$ENDPOINT_DETAIL" ] && line="$line${SEP}$ENDPOINT_DETAIL"
   printf '%s\n' "$line"
   exit 0
 }
@@ -142,10 +160,14 @@ map_log_state() {  # <line>
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(log_verb_of "$LOG_LINE")
 
-# pane_readable is consulted ONLY in the no-run fallback below. The run-step path
-# stays authoritative regardless of pane liveness - judge by the run-step, not the
-# shell - so a finished crew whose endpoint has closed still reports its run-step
-# state (e.g. done) instead of being masked as unknown. Backend-aware
+# For the default operator read, pane_readable is consulted ONLY in the no-run
+# fallback below. The run-step path stays authoritative regardless of pane
+# liveness - judge by the run-step, not the shell - so a finished crew whose
+# endpoint has closed still reports its run-step state (e.g. done) instead of
+# being masked as unknown. --reconcile deliberately inverts that one precedence:
+# it confirms the endpoint FIRST and reports the loss, because a supervisor
+# reconciling a wake needs endpoint loss not to hide behind a still-active run
+# record. Everything else about the run-step path is unchanged. Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
 # herdr task is read through fm_backend_capture instead of a bare tmux probe.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
@@ -157,6 +179,40 @@ pane_readable() {  # <target>
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
+# A single failed probe is NOT proof the endpoint is gone. pane_readable is a CLI
+# or socket round trip for every non-tmux backend (a herdr CLI timeout, a cmux
+# socket blip) and a momentarily unreachable tmux server fails every task at
+# once, so one miss would recommend relaunching crews that are alive and whose
+# pipeline is still running. Confirm with a bounded re-probe before concluding
+# loss; the retry count and delay are tunable so tests can drive both outcomes
+# without a wall-clock wait.
+ENDPOINT_RETRIES=${FM_CREW_STATE_ENDPOINT_RETRIES:-1}
+case "$ENDPOINT_RETRIES" in ''|*[!0-9]*) ENDPOINT_RETRIES=1 ;; esac
+ENDPOINT_RETRY_DELAY=${FM_CREW_STATE_ENDPOINT_RETRY_DELAY:-1}
+case "$ENDPOINT_RETRY_DELAY" in ''|*[!0-9]*) ENDPOINT_RETRY_DELAY=1 ;; esac
+endpoint_confirmed_readable() {  # <target>
+  local attempt=0
+  while :; do
+    if pane_readable "$1"; then return 0; fi
+    [ "$attempt" -lt "$ENDPOINT_RETRIES" ] || return 1
+    attempt=$((attempt + 1))
+    if [ "$ENDPOINT_RETRY_DELAY" -gt 0 ]; then sleep "$ENDPOINT_RETRY_DELAY"; fi
+  done
+}
+ENDPOINT_READABLE=unknown
+if [ "$RECONCILE_ENDPOINT" = 1 ] && [ -n "$BACKEND_TARGET" ]; then
+  if endpoint_confirmed_readable "$BACKEND_TARGET"; then
+    ENDPOINT_READABLE=alive
+    ENDPOINT_DETAIL='endpoint: alive'
+  else
+    ENDPOINT_READABLE=gone
+    ENDPOINT_DETAIL='endpoint: gone'
+  fi
+fi
+if [ "$RECONCILE_ENDPOINT" = 1 ]; then
+  [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
+  [ "$ENDPOINT_READABLE" = alive ] || emit unknown none "backend target gone: $BACKEND_TARGET"
+fi
 # crew_pane_is_busy: the busy-signature fallback, backend-aware the same way -
 # fm_backend_busy_state's native semantic state (herdr's agent.get) when
 # available, else the shared tmux pane-regex reader (fm_pane_is_busy,
@@ -664,7 +720,9 @@ fi
 # is no run to consult, so a dead/unreadable target means the crew is gone: report
 # unknown rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
-pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+if [ "$RECONCILE_ENDPOINT" != 1 ]; then
+  pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.

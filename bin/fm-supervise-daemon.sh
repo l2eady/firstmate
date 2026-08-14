@@ -180,6 +180,9 @@ STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
+# Consecutive unreadable probes before an endpoint is treated as lost. Shares
+# FM_ENDPOINT_MISS_POLLS with the watcher so both detectors apply one threshold.
+ENDPOINT_MISS_POLLS_DEFAULT=2
 # Max time a buffered escalation may sit undelivered before the daemon retries
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
@@ -362,11 +365,18 @@ discover_supervisor_backend() {
   return 1
 }
 
-# --- classification helpers (PURE: no side effects, testable) ---------------
+# --- classification helpers (testable; state dir is the only side effect) ----
 # last_status_line, status_is_captain_relevant, window_to_task, and
 # scan_captain_relevant_statuses come from bin/fm-classify-lib.sh (sourced above),
 # the single classifier shared with bin/fm-watch.sh. The decision-string wrappers
 # and dedup state below layer the daemon's escalation-digest concerns on top.
+#
+# NOT pure: classify_signal performs ONE bounded live-state read per referenced
+# task (fm-crew-state.sh, which may make a bounded no-mistakes call and probe the
+# backend endpoint) for the tasks that carry no captain-relevant verb in this
+# wake, and records the reconciliation dedupe markers for the ones it escalates.
+# classify_stale, classify_check, classify_heartbeat, and classify_unknown remain
+# pure reads. Keep classify_signal off any hot path.
 #
 # Decision protocol: every classifier prints exactly one line on stdout of the
 # form "<action>|<distilled>" where action is "self" or "escalate". The distilled
@@ -374,8 +384,12 @@ discover_supervisor_backend() {
 # summary firstmate would otherwise have to re-read.
 
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
-  for f in $reason; do
+  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen resolvable=""
+  local reconciliation reconcile_class reconcile_detail
+  local -a signal_files rel_tasks unhandled
+  read -r -a signal_files <<<"$reason"
+  rel_tasks=()
+  for f in "${signal_files[@]}"; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
@@ -387,13 +401,69 @@ classify_signal() {  # <reason-after-colon> <state>
     # single source of truth shared between the per-wake signal path and the
     # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
     task=$(basename "$f"); task="${task%.status}"
+    rel_tasks+=("$task")
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
   done
   # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
+  # Partition by TASK, not by wake. The watcher coalesces every signal that lands
+  # inside its grace window, so one wake routinely mixes a crew that reported a
+  # captain-relevant verb with another crew's bare turn-end. A task whose status
+  # carries a verb in this wake is owned by the deduplicated status path above;
+  # every other referenced task still needs live-state reconciliation, or a
+  # stopped or endpoint-gone crew rides along silently on someone else's verb
+  # (its .seen-* signature already advanced, a gone endpoint produces no stale
+  # wake, and the catch-all scan only looks at captain-relevant statuses).
+  # A wake enqueued just before its task was torn down still names paths that no
+  # longer exist; reconciling those would recommend recovering work that was
+  # deliberately finished. Mirror the captain-relevant loop's existence guard.
+  unhandled=()
+  for f in "${signal_files[@]}"; do
+    task=$(signal_file_task "$f")
+    [ -n "$task" ] || continue
+    resolvable=1
+    [ -e "$f" ] || continue
+    case " ${rel_tasks[*]-} " in *" $task "*) continue ;; esac
+    unhandled+=("$f")
+  done
+  if [ "${#unhandled[@]}" -gt 0 ]; then
+    # A no-verb signal is routine only with positive live-state evidence. This
+    # is the same bounded reconciliation the always-on watcher uses, extended
+    # with paused and recovery detail so away mode cannot silently absorb a
+    # stopped turn or lost endpoint.
+    reconciliation=$(signal_reconciliation_decision "$state" "${unhandled[@]}")
+  elif [ -n "$rel" ]; then
+    reconciliation='none|every referenced task is handled by the status path'
+  elif [ -n "$resolvable" ]; then
+    # The wake named real task files that no longer exist: the task was torn
+    # down between enqueue and handling. Deliberately finished work is not an
+    # orphan to recover.
+    reconciliation='vanished|task state was removed after the wake was queued (torn down); nothing left in flight to reconcile'
+  else
+    reconciliation='actionable|signal did not resolve a task; recommended action: inspect the queued wake and reconcile its task metadata'
+  fi
+  reconcile_class=${reconciliation%%|*}
+  reconcile_detail=${reconciliation#*|}
   if [ -z "$rel" ]; then
-    printf 'self|routine signal: %s' "$distilled"
+    case "$reconcile_class" in
+      working)    printf 'self|routine signal: %s (%s)' "$distilled" "$reconcile_detail" ;;
+      paused)     printf 'self|declared external pause: %s' "$reconcile_detail" ;;
+      seen)       printf 'self|reconciliation already escalated: %s' "$reconcile_detail" ;;
+      vanished)   printf 'self|%s' "$reconcile_detail" ;;
+      actionable) printf 'escalate|%s' "$reconcile_detail" ;;
+      *)          printf 'escalate|uncertain no-verb signal reconciliation: %s' "$reconciliation" ;;
+    esac
+  elif [ "$reconcile_class" = actionable ] && [ "$all_seen" = "1" ]; then
+    # A mixed wake whose captain-relevant statuses were ALL already escalated by
+    # the catch-all scan: carry only the coalesced task that still needs
+    # reconciliation. Re-attaching the distilled statuses here would reintroduce
+    # exactly the duplicate the all_seen branch below exists to prevent.
+    printf 'escalate|%s' "$reconcile_detail"
+  elif [ "$reconcile_class" = actionable ]; then
+    # A mixed wake: escalate the captain-relevant status AND the coalesced task
+    # that needs reconciliation, so neither is lost to the other's classification.
+    printf 'escalate|%s | %s' "$distilled" "$reconcile_detail"
   elif [ "$all_seen" = "1" ]; then
     # Every relevant status was already escalated by the catch-all scan;
     # self-handle to avoid a duplicate entry in the digest.
@@ -455,6 +525,12 @@ classify_unknown() {  # <reason>
 # Buffer:   state/.subsuper-escalations    one distilled line per escalation.
 # Seen:     state/.subsuper-seen-status-<task>  last status line the scan
 #           escalated, so the catch-all does not re-fire the same terminal.
+# Seen:     state/.subsuper-seen-reconcile-<task>  last reconciliation detail the
+#           signal path escalated, so an unchanged verdict (a crew that stays
+#           done, an endpoint that stays gone) does not re-inject on every later
+#           turn-end wake. Mirrors the status marker; cleared as soon as the task
+#           reconciles as working or paused again, or a new captain-relevant
+#           status is escalated for it, so a recurrence is never swallowed.
 
 _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
@@ -506,6 +582,9 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   marker="$state/.subsuper-paused-$key"
   watcher_key=$(_stale_key "$win")
   if status_is_paused "$last"; then
+    # A declared pause takes this window off the wedge recheck entirely, so any
+    # endpoint miss run in progress stops being consecutive here.
+    endpoint_miss_reset "$state" "$win"
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
@@ -551,6 +630,193 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
 mark_status_seen() {  # <state> <task> <last-line>
   local state=$1 task=$2 line=$3
   printf '%s' "$line" > "$state/.subsuper-seen-status-$(_stale_key "$task")"
+  # A fresh captain-relevant status supersedes whatever reconciliation last
+  # escalated for this task, so the reconciliation dedupe must not suppress the
+  # next divergence.
+  reconcile_seen_clear "$state" "$task"
+}
+
+# --- no-verb signal reconciliation dedupe -----------------------------------
+# The reconciliation escalation path is outside the status seen-marker (a bare
+# turn-end carries no status line for mark_escalated_seen to record), so it keeps
+# its own per-task marker. Without it, an unchanged verdict re-injects the same
+# digest on every later turn-end wake - the injection loop away-mode batching
+# must not have.
+_reconcile_seen_file() {  # <state> <task>
+  printf '%s/.subsuper-seen-reconcile-%s' "$1" "$(_stale_key "$2")"
+}
+
+reconcile_seen_matches() {  # <state> <task> <detail>
+  [ "$(cat "$(_reconcile_seen_file "$1" "$2")" 2>/dev/null || true)" = "$3" ]
+}
+
+mark_reconcile_seen() {  # <state> <task> <detail>
+  printf '%s' "$3" > "$(_reconcile_seen_file "$1" "$2")"
+}
+
+reconcile_seen_clear() {  # <state> <task>
+  rm -f "$(_reconcile_seen_file "$1" "$2")"
+}
+
+# --- endpoint-loss confirmation for the stale recheck -----------------------
+# A single failed capture is never proof of endpoint loss: a backend CLI timeout
+# or a momentarily unreachable server fails the probe for a crew whose pipeline
+# is still running, and acting on that means relaunching live work. The other two
+# endpoint-loss paths already guard this (fm-crew-state.sh re-probes;
+# fm-watch.sh requires consecutive misses), so the stale recheck uses the same
+# consecutive-miss rule with the watcher's own threshold.
+_endpoint_miss_file() {  # <state> <window>
+  printf '%s/.subsuper-endpoint-miss-%s' "$1" "$(_stale_key "$2")"
+}
+
+endpoint_miss_reset() {  # <state> <window>
+  rm -f "$(_endpoint_miss_file "$1" "$2")"
+}
+
+# 0 once this window has been unreadable for enough consecutive rechecks to be
+# treated as lost; 1 below the threshold, meaning keep waiting and recheck.
+# Sanitizes the shared threshold the same way the watcher does: an unusable value
+# left in a home's environment must fall back, not silently disable this detector
+# while the watcher keeps confirming at its own default.
+endpoint_loss_confirmed() {  # <state> <window>
+  local state=$1 win=$2 f n threshold
+  threshold=${FM_ENDPOINT_MISS_POLLS:-$ENDPOINT_MISS_POLLS_DEFAULT}
+  case "$threshold" in ''|*[!0-9]*) threshold=$ENDPOINT_MISS_POLLS_DEFAULT ;; esac
+  f=$(_endpoint_miss_file "$state" "$win")
+  n=$(( $(cat "$f" 2>/dev/null || echo 0) + 1 ))
+  printf '%s' "$n" > "$f"
+  [ "$n" -ge "$threshold" ]
+}
+
+# state/.endpoint-surfaced-<window> is the SHARED per-episode record for a lost
+# endpoint, written by whichever detector confirms the loss first and cleared by
+# the watcher's endpoint_miss_clear as soon as the endpoint reads again. THREE
+# detectors can observe one lost endpoint - the watcher's per-poll liveness
+# check, the daemon's stale recheck, and no-verb signal reconciliation - and they
+# run on independent cadences, so which gets there first is a matter of timing.
+# The guard only prevents a duplicate recovery recommendation in one digest if
+# every one of them both reads and writes this record.
+endpoint_already_surfaced() {  # <state> <window>
+  [ -e "$1/.endpoint-surfaced-$(_stale_key "$2")" ]
+}
+
+endpoint_mark_surfaced() {  # <state> <window>
+  : > "$1/.endpoint-surfaced-$(_stale_key "$2")"
+}
+
+# End the episode from this side. Demonstrated liveness is the same evidence the
+# watcher's endpoint_miss_clear acts on, so it has to retire the shared record
+# too: leaving it behind would let the NEXT genuine loss of the same endpoint be
+# swallowed as an already-surfaced episode.
+endpoint_clear_surfaced() {  # <state> <window>
+  rm -f "$1/.endpoint-surfaced-$(_stale_key "$2")"
+}
+
+# Resolve the recorded endpoint for a task id, or nothing when it has none.
+task_endpoint() {  # <state> <task>
+  window_for_task "$(_stale_key "$2")" "$1" 2>/dev/null || true
+}
+
+# 0 when the task's CURRENT last status line is captain-relevant and identical to
+# the line the status path already escalated. Reconciliation of such a task adds
+# nothing: the captain was already told about that terminal, and a crew that
+# reports done keeps ending turns (the monitor-until-merge phase) and eventually
+# closes its endpoint, both of which reconcile as actionable. Without this, every
+# escalated completion produced a second digest entry for the same event.
+reconcile_status_already_escalated() {  # <state> <task>
+  local state=$1 task=$2 last
+  last=$(last_status_line "$state/$task.status")
+  [ -n "$last" ] || return 1
+  status_is_captain_relevant "$last" || return 1
+  [ "$(cat "$state/.subsuper-seen-status-$(_stale_key "$task")" 2>/dev/null || true)" = "$last" ]
+}
+
+# --- one-wake pending suppression intents -----------------------------------
+# Classification runs inside a command substitution, so a hook cannot hand
+# anything back to handle_wake except through a file. Suppression markers must
+# not become authoritative before the escalation is actually buffered - the
+# ordering bin/fm-watch.sh already uses - or a lost append silences the very
+# orphan this check exists to break. So the hook STAGES its marker writes here
+# and handle_wake commits them only after escalate_add succeeds.
+_reconcile_pending_file() {  # <state>
+  printf '%s/.subsuper-reconcile-pending' "$1"
+}
+
+reconcile_pending_discard() {  # <state>
+  rm -f "$(_reconcile_pending_file "$1")"
+}
+
+# NUL-delimited, four fields per record. Two of them are crew-authored free text
+# (a status line, and a detail quoting it), so any in-band separator a status
+# line can legally contain - a tab, a newline - would shift the parse and store a
+# truncated status or an unmatchable detail: the first re-escalates the terminal
+# the catch-all was meant to stop repeating, the second re-escalates the same
+# reconciliation on every later wake. A NUL cannot occur in either value, so
+# every field round-trips exactly and an absent one stays empty.
+reconcile_pending_stage() {  # <state> <task> <window> <terminal-status> <detail>
+  printf '%s\0%s\0%s\0%s\0' "$2" "${3:-}" "${4:-}" "$5" >> "$(_reconcile_pending_file "$1")"
+}
+
+# Commit every staged intent. mark_status_seen runs FIRST because it clears the
+# reconcile marker; staging the task's current captain-relevant status here is
+# what stops the catch-all scan from re-reporting a completion this wake already
+# quoted in its own `last reported:` field.
+reconcile_pending_commit() {  # <state>
+  local state=$1 f task win last detail
+  f=$(_reconcile_pending_file "$state")
+  [ -s "$f" ] || { rm -f "$f"; return 0; }
+  while IFS= read -r -d '' task &&
+        IFS= read -r -d '' win &&
+        IFS= read -r -d '' last &&
+        IFS= read -r -d '' detail; do
+    [ -n "$task" ] || continue
+    [ -z "$last" ] || mark_status_seen "$state" "$task" "$last"
+    [ -z "$win" ] || endpoint_mark_surfaced "$state" "$win"
+    mark_reconcile_seen "$state" "$task" "$detail"
+  done < "$f"
+  rm -f "$f"
+}
+
+# The dedupe seam bin/fm-classify-lib.sh's signal_crew_reconciliation calls per
+# task. It reads the authoritative markers, stages the writes this wake would
+# make, and prints the detail to carry - or nothing when this task is already
+# covered; the classification and the wake-level fold stay in the library.
+reconcile_task_dedupe_hook() {  # <task> <class> <detail>
+  local task=$1 class=$2 detail=$3 state=${FM_RECONCILE_HOOK_STATE:-} win="" last=""
+  [ -n "$state" ] || { printf '%s' "$detail"; return; }
+  case "$class" in
+    working|paused)
+      # Demonstrated liveness ends any endpoint-loss run in progress, so a later
+      # blip cannot land on top of an older one and reach the threshold.
+      reconcile_seen_clear "$state" "$task"
+      win=$(task_endpoint "$state" "$task")
+      if [ -n "$win" ]; then
+        endpoint_miss_reset "$state" "$win"
+        endpoint_clear_surfaced "$state" "$win"
+      fi
+      return ;;
+  esac
+  reconcile_status_already_escalated "$state" "$task" && return
+  reconcile_seen_matches "$state" "$task" "$detail" && return
+  if [ "$class" = endpoint-lost ]; then
+    win=$(task_endpoint "$state" "$task")
+    if [ -n "$win" ]; then
+      endpoint_already_surfaced "$state" "$win" && return
+    fi
+  fi
+  last=$(last_status_line "$state/$task.status")
+  status_is_captain_relevant "$last" || last=""
+  reconcile_pending_stage "$state" "$task" "$win" "$last" "$detail"
+  printf '%s' "$detail"
+}
+
+# Reconcile the tasks a wake references that the status path does not already
+# own. The verdict comes from the library's single fold; this only supplies the
+# daemon's digest-dedupe bookkeeping through its hook.
+signal_reconciliation_decision() {  # <state> <file> ...
+  local state=$1; shift
+  FM_RECONCILE_HOOK_STATE="$state" FM_RECONCILE_TASK_HOOK=reconcile_task_dedupe_hook \
+    signal_crew_reconciliation "$state" "$@"
 }
 
 # Mark every captain-relevant status line a per-wake classification escalated as
@@ -643,11 +909,14 @@ stale_window_is_busy() {  # <window> <state>
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
+# Non-zero when the item could not be appended (full or read-only state dir), so
+# a caller can withhold suppression markers and leave the event eligible for a
+# later retry rather than losing it silently.
 escalate_add() {  # <state> <distilled-item>
   local state=$1 item=$2 buf
   buf="$state/.subsuper-escalations"
-  [ -s "$buf" ] || _now > "${buf}.since"
-  printf '%s\n' "$item" >> "$buf"
+  [ -s "$buf" ] || _now > "${buf}.since" || true
+  printf '%s\n' "$item" >> "$buf" || return 1
 }
 
 # Flush the escalation buffer as ONE batched, single-line digest to the
@@ -1017,18 +1286,49 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
+    # The miss count means CONSECUTIVE unreadable rechecks, so every tick that
+    # does not actually probe has to end the run. Without this a single old blip
+    # survives a refreshed wedge timer and pairs with an unrelated later blip to
+    # "confirm" a loss for a crew that is alive and still running.
     if [ -n "$last" ] && status_is_paused "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
-    [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
+    if [ "$age" -lt "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ]; then
+      endpoint_miss_reset "$state" "$win"
+      continue
+    fi
     stale_window_is_busy "$win" "$state"
     case "$?" in
-      0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-         stale_marker_remove "$win" "$state" ;;
+      0) endpoint_miss_reset "$state" "$win"; rm -f "$marker" ;;
+      2) # The endpoint became unreadable while a wedge timer was running. The
+         # task still has recorded metadata, so it is in flight with nowhere to
+         # report from - the orphan shape, not a reason to drop the marker
+         # silently. But stale_window_is_busy concludes that from ONE capture,
+         # and one miss is not proof, so confirm it across consecutive rechecks
+         # and keep the stale marker until then so the recheck repeats.
+         if endpoint_already_surfaced "$state" "$win"; then
+           endpoint_miss_reset "$state" "$win"
+           rm -f "$marker"
+         elif endpoint_loss_confirmed "$state" "$win"; then
+           # Claim the shared episode and drop the wedge timer ONLY once the item
+           # is really buffered; otherwise the marker would silence the watcher's
+           # own detector for an escalation the digest never received.
+           if escalate_add "$state" "task $task endpoint unreadable after ${age}s idle ($win); last reported: ${last:-no status}; recommended recovery: $(endpoint_recovery_advice "$(task_kind "$state" "$task")")"; then
+             endpoint_mark_surfaced "$state" "$win"
+             endpoint_miss_reset "$state" "$win"
+             rm -f "$marker"
+           else
+             log "escalate FAILED to buffer (state dir unwritable?): endpoint loss for $task ($win); episode left unclaimed for retry"
+           fi
+         fi ;;
+      *) endpoint_miss_reset "$state" "$win"
+         if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
+           stale_marker_remove "$win" "$state"
+         else
+           log "escalate FAILED to buffer (state dir unwritable?): wedge for $win; stale marker kept for retry"
+         fi ;;
     esac
   done
 
@@ -1061,8 +1361,13 @@ housekeeping() {  # <state>
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_paused "$last"; then
-          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
-          _now > "$marker"
+          # Reset the re-surface window only on a real append, or the recheck the
+          # captain never saw would not come round again for another full window.
+          if escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"; then
+            _now > "$marker"
+          else
+            log "escalate FAILED to buffer (state dir unwritable?): pause recheck for $win; window left aged for retry"
+          fi
         else
           rm -f "$marker"
         fi
@@ -1081,8 +1386,13 @@ housekeeping() {  # <state>
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
-      escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
-      mark_status_seen "$state" "$task" "$last"
+      # Retire the status only on a real append: marking it seen after a lost
+      # write would drop a captain-relevant terminal that never reached anyone.
+      if escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"; then
+        mark_status_seen "$state" "$task" "$last"
+      else
+        log "escalate FAILED to buffer (state dir unwritable?): catch-all $task; status left unseen for retry"
+      fi
     done < <(scan_captain_relevant_statuses "$state")
   fi
 }
@@ -1219,6 +1529,7 @@ handle_wake() {  # <reason> <state>
     log "wake force-self (FM_INJECT_SKIP): $reason"
     return
   fi
+  reconcile_pending_discard "$state"
   case "$reason" in
     signal:*) kind=signal; arg="${reason#signal: }"
               decision=$(classify_signal "$arg" "$state") ;;
@@ -1234,18 +1545,27 @@ handle_wake() {  # <reason> <state>
   case "$action" in
     escalate)
       log "escalate: $reason -> $distilled"
-      escalate_add "$state" "$distilled"
-      # A terminal-stale escalate must not leave a persistence marker behind, or
-      # housekeeping re-escalates the same pane as a false wedge later.
-      [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
-      mark_escalated_seen "$kind" "$arg" "$state"
-      [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+      if escalate_add "$state" "$distilled"; then
+        # A terminal-stale escalate must not leave a persistence marker behind, or
+        # housekeeping re-escalates the same pane as a false wedge later.
+        [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
+        mark_escalated_seen "$kind" "$arg" "$state"
+        reconcile_pending_commit "$state"
+        [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+      else
+        # The buffer append failed, so nothing reached the digest. Withhold every
+        # suppression marker: the event stays eligible for the next wake instead
+        # of being silenced by bookkeeping for an escalation that never happened.
+        log "escalate FAILED to buffer (state dir unwritable?): $reason -> $distilled"
+        reconcile_pending_discard "$state"
+      fi
       ;;
     pause)
       # Declared external-wait pause: record a pause marker (long re-surface
       # cadence in housekeeping) and drop any wedge stale marker, so a pane that
       # transitioned working->paused is not still wedge-aged. Only stale produces
       # this action.
+      reconcile_pending_discard "$state"
       if [ "$kind" = "stale" ]; then
         stale_marker_remove "$arg" "$state"
         pause_marker_record "$arg" "$state"
@@ -1253,6 +1573,7 @@ handle_wake() {  # <reason> <state>
       log "self-handle (paused): $reason -> $distilled"
       ;;
     *)
+      reconcile_pending_discard "$state"
       # Transient (non-terminal) stale: record/refresh the wedge marker so
       # housekeeping can age it, and drop any pause marker (a crew that left its
       # pause reverts to normal wedge aging). The persistence recheck, not this

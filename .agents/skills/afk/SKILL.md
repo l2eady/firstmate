@@ -119,23 +119,36 @@ The daemon wraps `fm-watch.sh`, runs the watcher as a child, classifies each
 wake reason in bash, and self-handles the routine majority without consuming a
 firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
-The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
+The classification predicates (the captain-relevant verb set, declared-pause vocabulary, bounded current-state reconciliation, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
 While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
 
 Classify each wake this way:
 
-- `signal` whose status content has no captain-relevant verb
+- Classify a `signal` per TASK, not per wake, because the watcher coalesces every signal that lands inside its grace window into one wake.
+- A task whose status carries a captain-relevant verb
   (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
-  -> self-handle. Captain-relevant verb -> escalate.
+  -> escalate on the existing deduplicated status path.
+- Every other task the same wake references, including a bare turn-end coalesced alongside someone else's verb -> run one bounded `fm-crew-state.sh` reconciliation per task through the shared classifier.
+  Positive run-step or busy-pane evidence -> self-handle.
+  A declared external pause -> self-handle and retain its bounded pause recheck.
+  A stopped, idle, uncertain, or endpoint-gone task -> escalate immediately with its task id, current-state evidence, and recommended continuation or recovery action.
+  That reconciliation escalation carries its own per-task dedupe, so an unchanged verdict does not re-inject on every later turn-end; the marker clears as soon as the task reconciles as working or paused again, or a new captain-relevant status is escalated for it.
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
+  This includes the watcher's own endpoint-liveness poll (`check: endpoint <target>: ...`), which fires once per episode after several consecutive unreadable probes of a recorded in-flight endpoint - the orphan the stale layer cannot see, because a dead endpoint produces no pane to hash and no further status or turn-end write.
+  It reports per task, so a backend outage arrives as one such item per affected task rather than as a single fleet-level verdict; that is deliberate, because guessing "backend outage" from the same shape would suppress a real orphan.
 - `stale` with a terminal status -> escalate. Non-terminal stale is transient:
   record a marker and self-handle. If the pane is still idle past
   `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a
   possible wedge. This bounds wedge-detection latency to the threshold plus a
   tick: a delay, never a loss. Healthy crewmates are autonomous and do not wait
   on firstmate mid-task.
+  If the window's endpoint becomes unreadable while that wedge timer is running,
+  the recheck escalates it as endpoint loss with the same recovery wording rather
+  than dropping the marker, once the same consecutive-miss threshold the watcher
+  uses confirms it, and shares the one per-episode record so only the detector
+  that gets there first reports it.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
   captain-relevant status line the per-wake classifier might miss.
@@ -204,6 +217,13 @@ These properties must hold:
 
 - Nothing is lost. The durable queue plus `fm-wake-drain.sh` recover any missed
   or crashed injection.
+- Suppression follows delivery. Every seen-status, reconciliation, endpoint-episode,
+  wedge, and pause-window marker is written only after the escalation is really
+  buffered, so a state dir that cannot accept the append leaves the event eligible
+  for the next wake instead of silencing it with bookkeeping for a digest that was
+  never produced.
+- An in-flight task whose endpoint dies is still surfaced, even though it can no
+  longer write a status line or a turn-end marker.
 - Wedge detection is bounded-latency, not lossy.
 - Declared external waits are rechecked on a separate, bounded cadence rather than being mislabeled as wedges.
 - The catch-all scan backs up the keyword classifier.

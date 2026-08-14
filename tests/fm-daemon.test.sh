@@ -92,11 +92,14 @@ test_daemon_state_root_uses_fm_home() {
 }
 
 test_classify_routine_signal_self() {
-  local dir state out
+  local dir state fakebin crew_state out
   dir=$(make_supercase classify-routine)
-  state="$dir/state"
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
   printf 'working: step 1\nworking: step 2\n' > "$state/foo-x1.status"
-  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/foo-x1.status" "$state")
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    classify_signal "$state/foo-x1.status" "$state")
   case "$out" in self\|*) pass "routine signal self-handles" ;; *) fail "routine signal did not self-handle: $out" ;; esac
 }
 
@@ -186,15 +189,18 @@ test_handle_wake_paused_records_pause_marker() {
 }
 
 test_handle_wake_paused_signal_records_pause_marker() {
-  local dir state key win
+  local dir state fakebin crew_state key win
   dir=$(make_supercase handle-paused-signal)
-  state="$dir/state"
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
   win="sess:fm-held-w10-signal"
   printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-signal.meta"
   printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10-signal.status"
   key=$(printf '%s' "held-w10-signal" | tr ':/.' '___')
   date +%s > "$state/.subsuper-stale-$key"
-  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held-w10-signal.status" "$state"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the vendor rate-limit reset' \
+    handle_wake "signal: $state/held-w10-signal.status" "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "pause signal did not record a pause marker"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "pause signal did not clear the wedge marker"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a declared pause signal escalated instead of self-handling"
@@ -591,11 +597,14 @@ test_heartbeat_scan_skips_orphaned_status() {
 }
 
 test_handle_wake_routes_self_and_escalate() {
-  local dir state
+  local dir state fakebin crew_state
   dir=$(make_supercase handle)
-  state="$dir/state"
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
   printf 'working\n' > "$state/h-routine.status"
-  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/h-routine.status" "$state"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating' \
+    handle_wake "signal: $state/h-routine.status" "$state"
   [ -s "$state/.subsuper-escalations" ] && fail "routine signal was escalated by handle_wake"
   printf 'done: PR 1\n' > "$state/h-done.status"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/h-done.status" "$state"
@@ -906,6 +915,670 @@ test_classify_signal_dedup_against_scan() {
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in escalate\|*) ;; *) fail "signal should escalate when not seen: $out" ;; esac
   pass "classify_signal dedupes against the catch-all scan seen marker"
+}
+
+test_classify_signal_mixed_wake_reconciles_the_other_task() {
+  # The watcher coalesces every signal inside its grace window, so one wake mixes
+  # a crew that reported a captain-relevant verb with another crew's bare
+  # turn-end. Regression: the second crew's lost endpoint must not ride along
+  # silently on the first crew's verb.
+  local dir state fakebin crew_state out
+  dir=$(make_supercase signal-mixed-wake)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  # Both are IN-FLIGHT tasks: fm-spawn records the meta before a crew can signal,
+  # and a signal whose meta is gone is settled history the reconciler absorbs.
+  fm_write_meta "$state/mixed-verb-m1.meta" "window=sess:fm-mixed-verb-m1" "kind=ship"
+  fm_write_meta "$state/mixed-orphan-m2.meta" "window=sess:fm-mixed-orphan-m2" "kind=ship"
+  printf 'done: PR https://x/y/pull/11\n' > "$state/mixed-verb-m1.status"
+  : > "$state/mixed-orphan-m2.turn-ended"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE_mixed_orphan_m2='state: unknown · source: none · backend target gone: sess:fm-mixed-orphan-m2 · endpoint: gone' \
+    classify_signal "$state/mixed-verb-m1.status $state/mixed-orphan-m2.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "mixed wake did not escalate: $out" ;; esac
+  assert_contains "$out" "mixed-verb-m1.status: done: PR https://x/y/pull/11" \
+    "mixed wake dropped the captain-relevant status"
+  assert_contains "$out" "task mixed-orphan-m2 endpoint gone" \
+    "mixed wake absorbed the coalesced orphan turn-end"
+  assert_contains "$out" "recommended recovery:" "mixed wake carried no recovery guidance"
+
+  # A crew whose own status carried the verb is owned by the status path, so its
+  # coalesced turn-end must not be reconciled into a second entry.
+  : > "$state/mixed-verb-m1.turn-ended"
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · fake default' \
+    classify_signal "$state/mixed-verb-m1.status $state/mixed-verb-m1.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "terminal status wake did not escalate: $out" ;; esac
+  assert_not_contains "$out" "task mixed-verb-m1" \
+    "a task handled by the status path was reconciled into a duplicate entry"
+  pass "classify_signal reconciles coalesced tasks the status path does not own"
+}
+
+test_classify_signal_mixed_wake_drops_already_escalated_status() {
+  # The catch-all scan can escalate a coalesced status before the queued wake is
+  # drained. Regression: the mixed-wake branch must then carry ONLY the task that
+  # still needs reconciliation, or the captain gets a second digest entry for a
+  # completion the scan already reported.
+  local dir state fakebin crew_state out key
+  dir=$(make_supercase signal-mixed-seen)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/seen-verb-s1.meta" "window=sess:fm-seen-verb-s1" "kind=ship"
+  fm_write_meta "$state/seen-orphan-s2.meta" "window=sess:fm-seen-orphan-s2" "kind=ship"
+  printf 'done: PR https://x/y/pull/13 checks green\n' > "$state/seen-verb-s1.status"
+  : > "$state/seen-orphan-s2.turn-ended"
+  # The catch-all scan already escalated the status and recorded its marker.
+  key=$(printf '%s' "seen-verb-s1" | tr ':/.' '___')
+  printf 'done: PR https://x/y/pull/13 checks green' > "$state/.subsuper-seen-status-$key"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE_seen_orphan_s2='state: unknown · source: none · backend target gone: sess:fm-seen-orphan-s2 · endpoint: gone' \
+    classify_signal "$state/seen-verb-s1.status $state/seen-orphan-s2.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "the coalesced orphan was lost to the seen status: $out" ;; esac
+  assert_contains "$out" "task seen-orphan-s2 endpoint gone" \
+    "the coalesced orphan was not escalated"
+  assert_not_contains "$out" "PR https://x/y/pull/13" \
+    "an already-escalated completion was re-escalated alongside the orphan"
+  pass "a mixed wake whose statuses were already escalated carries only the unreconciled task"
+}
+
+test_classify_signal_reconciliation_dedup() {
+  # The reconciliation escalation path has no status line for the status seen
+  # marker to record, so it keeps its own. Regression: an unchanged verdict must
+  # not re-inject the same digest on every later turn-end wake. Driven through
+  # handle_wake because the dedupe marker only becomes authoritative once the
+  # escalation has actually been buffered.
+  local dir state fakebin crew_state key buffered
+  dir=$(make_supercase signal-reconcile-dedup)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/recon-dup-r7.meta" "window=sess:fm-recon-dup-r7" "kind=ship"
+  : > "$state/recon-dup-r7.turn-ended"
+  key=$(printf '%s' "recon-dup-r7" | tr ':/.' '___')
+
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · outcome: checks-passed' \
+    handle_wake "signal: $state/recon-dup-r7.turn-ended" "$state"
+  grep -F 'task recon-dup-r7 reports done' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "first reconciliation was not escalated: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ -e "$state/.subsuper-seen-reconcile-$key" ] || fail "first reconciliation recorded no dedupe marker"
+  buffered=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
+
+  # Same unchanged verdict on the next turn-end: self-handle, no second digest.
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · outcome: checks-passed' \
+    handle_wake "signal: $state/recon-dup-r7.turn-ended" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq "$buffered" ] \
+    || fail "unchanged reconciliation re-escalated: $(cat "$state/.subsuper-escalations")"
+
+  # A changed verdict is a new fact and must surface again.
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-recon-dup-r7 · endpoint: gone' \
+    handle_wake "signal: $state/recon-dup-r7.turn-ended" "$state"
+  grep -F 'task recon-dup-r7 endpoint gone' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a changed reconciliation verdict was suppressed: $(cat "$state/.subsuper-escalations")"
+
+  # Recovering to provably-working clears the marker, so a later recurrence of
+  # the earlier verdict is never swallowed.
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating' \
+    handle_wake "signal: $state/recon-dup-r7.turn-ended" "$state"
+  [ ! -e "$state/.subsuper-seen-reconcile-$key" ] || fail "recovery did not clear the reconciliation dedupe marker"
+  : > "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-recon-dup-r7 · endpoint: gone' \
+    handle_wake "signal: $state/recon-dup-r7.turn-ended" "$state"
+  grep -F 'task recon-dup-r7 endpoint gone' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a recurrence after recovery was swallowed: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  pass "reconciliation deduplicates unchanged verdicts without swallowing recurrences"
+}
+
+test_classify_signal_reconciliation_respects_escalated_terminal() {
+  # A crew that reported done keeps ending turns (monitor-until-merge) and
+  # eventually closes its endpoint. Regression: those later bare turn-ends must
+  # not re-tell the captain about the completion the status path already
+  # escalated, and must resume surfacing once the crew's status moves on.
+  local dir state fakebin crew_state out key
+  dir=$(make_supercase signal-terminal-reconcile)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  key=$(printf '%s' "term-t3" | tr ':/.' '___')
+  printf 'done: PR https://x/y/pull/12 checks green\n' > "$state/term-t3.status"
+  fm_write_meta "$state/term-t3.meta" "window=sess:fm-term-t3" "kind=ship"
+  : > "$state/term-t3.turn-ended"
+
+  # Wake 1: the status path escalates and records the seen marker.
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · outcome: checks-passed' \
+    classify_signal "$state/term-t3.status" "$state")
+  case "$out" in escalate\|*) ;; *) fail "terminal status did not escalate: $out" ;; esac
+  FM_STATE_OVERRIDE="$state" mark_escalated_seen signal "$state/term-t3.status" "$state"
+
+  # Wake 2: a bare turn-end for the same, unchanged completion.
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · outcome: checks-passed' \
+    classify_signal "$state/term-t3.turn-ended" "$state")
+  case "$out" in self\|*) ;; *) fail "an already-escalated completion was re-escalated by reconciliation: $out" ;; esac
+  [ ! -e "$state/.subsuper-seen-reconcile-$key" ] \
+    || fail "an already-covered task recorded a reconciliation marker"
+
+  # The crew's status moves on: reconciliation must surface again.
+  printf 'done: PR https://x/y/pull/12 checks green\nworking: applying review fixes\n' > "$state/term-t3.status"
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-term-t3 · endpoint: gone' \
+    classify_signal "$state/term-t3.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "a lost endpoint after the status moved on was suppressed: $out" ;; esac
+  assert_contains "$out" "task term-t3 endpoint gone" "the resumed escalation lost its recovery detail"
+  pass "reconciliation defers to an already-escalated terminal status without swallowing later divergence"
+}
+
+test_reconciliation_before_catch_all_marks_the_terminal_seen() {
+  # /afk can start the daemon after a crew already reported done, so no seen
+  # marker exists yet. A bare turn-end then reconciles FIRST and quotes that
+  # completion in its own "last reported:" field. Regression: the catch-all scan
+  # must not then buffer a second entry for the same completion.
+  local dir state fakebin crew_state
+  dir=$(make_supercase reconcile-before-catchall)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/first-f1.meta" "window=sess:fm-first-f1" "kind=ship"
+  printf 'done: PR https://x/y/pull/41 checks green\n' > "$state/first-f1.status"
+  : > "$state/first-f1.turn-ended"
+
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-first-f1 · endpoint: gone' \
+    handle_wake "signal: $state/first-f1.turn-ended" "$state"
+  grep -F 'task first-f1 endpoint gone' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the reconciliation escalation was not buffered: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "the reconciliation wake buffered more than one entry"
+
+  FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "the catch-all scan duplicated a completion reconciliation already reported: $(cat "$state/.subsuper-escalations")"
+  pass "a reconciliation that quotes a terminal status marks it seen so the catch-all cannot repeat it"
+}
+
+test_reconciliation_carries_the_terminal_it_retires() {
+  # Marking a status seen retires it for the catch-all scan, so the escalation
+  # that does the marking has to carry that exact text. Regression: a `done` (or
+  # decision) reconciliation whose live-state line does NOT repeat the status
+  # note must still put the crew's own report - PR URL and all - in the digest.
+  local dir state fakebin crew_state
+  dir=$(make_supercase reconcile-carries-terminal)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/carry-c1.meta" "window=sess:fm-carry-c1" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/41 checks green\n' > "$state/carry-c1.status"
+  : > "$state/carry-c1.turn-ended"
+
+  # The run-step read reports done WITHOUT the status-log note, so the PR URL
+  # exists only in the status line the escalation is about to retire.
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review · endpoint: alive' \
+    handle_wake "signal: $state/carry-c1.turn-ended" "$state"
+  grep -F 'https://github.com/o/r/pull/41' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the digest lost the completion's PR URL: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+
+  # And it is retired exactly once: the catch-all must not repeat it.
+  FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+  [ "$(grep -c 'https://github.com/o/r/pull/41' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "the retired completion was duplicated by the catch-all: $(cat "$state/.subsuper-escalations")"
+
+  # Same shape for a decision: the question itself must survive.
+  fm_write_meta "$state/carry-c2.meta" "window=sess:fm-carry-c2" "kind=ship"
+  printf 'needs-decision: which auth provider?\n' > "$state/carry-c2.status"
+  : > "$state/carry-c2.turn-ended"
+  : > "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s) · endpoint: alive' \
+    handle_wake "signal: $state/carry-c2.turn-ended" "$state"
+  grep -F 'which auth provider?' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the digest lost the decision's question: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  pass "a reconciliation that retires a captain-relevant status carries that status text"
+}
+
+test_reconciliation_frames_a_retired_blocker_as_a_blocker() {
+  # The reconciliation retires the status for the catch-all, so its wording is
+  # the only framing the captain gets. Regression: a blocked crew reconciling
+  # from its own status log must not be described as routine unfinished work.
+  local dir state fakebin crew_state
+  dir=$(make_supercase reconcile-blocked-framing)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/blk-b1.meta" "window=sess:fm-blk-b1" "kind=ship"
+  printf 'blocked: waiting on captain credentials\n' > "$state/blk-b1.status"
+  : > "$state/blk-b1.turn-ended"
+
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: blocked · source: status-log · waiting on captain credentials · endpoint: alive' \
+    handle_wake "signal: $state/blk-b1.turn-ended" "$state"
+  grep -F 'task blk-b1 reports blocked' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the blocked crew was not framed as blocked: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  grep -F 'continue the unfinished task' "$state/.subsuper-escalations" >/dev/null \
+    && fail "the blocked crew was framed as routine unfinished work: $(cat "$state/.subsuper-escalations")"
+  grep -F 'waiting on captain credentials' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the digest lost the blocker's own text: $(cat "$state/.subsuper-escalations")"
+
+  # And it is retired exactly once - the catch-all must not re-frame it either.
+  FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+  [ "$(grep -c 'waiting on captain credentials' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "the retired blocker was duplicated by the catch-all: $(cat "$state/.subsuper-escalations")"
+  pass "a reconciliation that retires a blocked status frames it as a blocker, once"
+}
+
+test_reconciliation_suppression_survives_a_tabbed_status_line() {
+  # Status lines are crew-authored free text, so a pasted table fragment can put
+  # a tab in the very line a reconciliation retires. Staging that through a
+  # separator the value can itself contain truncates the recorded status - the
+  # catch-all then re-escalates the terminal - and stores an unmatchable detail,
+  # so the identical reconciliation repeats on every later turn-end wake.
+  local dir state fakebin crew_state tabbed fakeline
+  dir=$(make_supercase reconcile-tabbed-status)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  tabbed=$(printf 'blocked: needs\tcolumn\taccess granted')
+  fakeline=$(printf 'state: blocked · source: status-log · needs\tcolumn\taccess · endpoint: alive')
+  fm_write_meta "$state/tab-t1.meta" "window=sess:fm-tab-t1" "kind=ship"
+  printf '%s\n' "$tabbed" > "$state/tab-t1.status"
+  : > "$state/tab-t1.turn-ended"
+
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE="$fakeline" \
+    handle_wake "signal: $state/tab-t1.turn-ended" "$state"
+  grep -F 'task tab-t1 reports blocked' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the tab-bearing blocker was never escalated: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+
+  # The status it retired must be recorded whole, or the catch-all repeats it.
+  FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+  [ "$(grep -cF 'access granted' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "a tab truncated the retired status, so the catch-all repeated it: $(cat "$state/.subsuper-escalations")"
+
+  # And the staged detail must round-trip, or the same reconciliation re-fires.
+  : > "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE="$fakeline" \
+    handle_wake "signal: $state/tab-t1.turn-ended" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "the identical reconciliation repeated after a tab-bearing status: $(cat "$state/.subsuper-escalations")"
+  pass "a tab in a crew-authored status line cannot break reconciliation suppression"
+}
+
+test_housekeeping_append_failure_preserves_detector_state() {
+  # escalate_add reports a lost append; every housekeeping caller must withhold
+  # the bookkeeping that would retire the event, or the digest loses it forever.
+  local dir state fakebin key wkey pane
+  dir=$(make_supercase housekeeping-append-fails)
+  state="$dir/state"; fakebin="$dir/fakebin"; pane="$dir/pane.txt"
+  printf 'idle prompt\n' > "$pane"
+  fm_write_meta "$state/nospc-n1.meta" "window=sess:fm-nospc-n1" "kind=ship"
+  printf 'working: building\n' > "$state/nospc-n1.status"
+  fm_write_meta "$state/nospc-n2.meta" "window=sess:fm-nospc-n2" "kind=ship"
+  printf 'done: PR https://x/y/pull/51 checks green\n' > "$state/nospc-n2.status"
+  key=$(printf '%s' "nospc-n1" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-nospc-n1" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  # A directory cannot be appended to as a file, so every append fails.
+  mkdir -p "$state/.subsuper-escalations"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 \
+    FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state" 2>/dev/null
+  [ ! -e "$state/.endpoint-surfaced-$wkey" ] \
+    || fail "a failed append still claimed the shared endpoint episode"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "a failed append still dropped the wedge marker"
+  [ ! -e "$state/.subsuper-seen-status-$(printf '%s' "nospc-n2" | tr ':/.' '___')" ] \
+    || fail "a failed catch-all append still retired the terminal status"
+
+  # Buffer writable again: both events still reach the digest.
+  rmdir "$state/.subsuper-escalations"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 \
+    FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+  grep -F 'task nospc-n1 endpoint unreadable' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the retried endpoint loss never reached the digest: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  grep -F 'https://x/y/pull/51' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the retried catch-all status never reached the digest: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  pass "a failed housekeeping append preserves every detector's state for retry"
+}
+
+test_housekeeping_pause_recheck_append_failure_keeps_the_window() {
+  # The pause re-surface resets its window on escalation. A lost append must not
+  # reset it, or the recheck the captain never saw waits another full window.
+  local dir state fakebin key pane before
+  dir=$(make_supercase pause-append-fails)
+  state="$dir/state"; fakebin="$dir/fakebin"; pane="$dir/pane.txt"
+  printf 'idle prompt\n' > "$pane"
+  fm_write_meta "$state/held-p1.meta" "window=sess:fm-held-p1" "kind=ship"
+  printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-p1.status"
+  key=$(printf '%s' "held-p1" | tr ':/.' '___')
+  before=$(( $(date +%s) - 5000 ))
+  echo "$before" > "$state/.subsuper-paused-$key"
+  mkdir -p "$state/.subsuper-escalations"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state" 2>/dev/null
+  [ "$(cat "$state/.subsuper-paused-$key")" = "$before" ] \
+    || fail "a failed append still reset the pause re-surface window"
+
+  rmdir "$state/.subsuper-escalations"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  grep -F 'awaiting external, recheck whether the wait still holds' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the retried pause recheck never reached the digest: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ "$(cat "$state/.subsuper-paused-$key")" != "$before" ] \
+    || fail "a successful pause recheck did not reset its window"
+  pass "a failed pause-recheck append keeps its window aged for retry"
+}
+
+test_failed_escalate_append_withholds_suppression() {
+  # Suppression must never outlive a lost append. If the buffer write fails, the
+  # digest never got the item, so every seen/endpoint marker has to be withheld
+  # and the same wake must still escalate once the buffer is writable again.
+  local dir state fakebin crew_state key wkey
+  dir=$(make_supercase escalate-append-fails)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/lost-l1.meta" "window=sess:fm-lost-l1" "kind=ship"
+  printf 'done: PR https://x/y/pull/42 checks green\n' > "$state/lost-l1.status"
+  : > "$state/lost-l1.turn-ended"
+  key=$(printf '%s' "lost-l1" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-lost-l1" | tr ':/.' '___')
+  # A directory cannot be appended to as a file, so the buffer write fails
+  # exactly as a full or read-only state dir would.
+  mkdir -p "$state/.subsuper-escalations"
+
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-lost-l1 · endpoint: gone' \
+    handle_wake "signal: $state/lost-l1.turn-ended" "$state" 2>/dev/null
+  [ ! -e "$state/.subsuper-seen-reconcile-$key" ] \
+    || fail "a failed append still recorded the reconciliation dedupe marker"
+  [ ! -e "$state/.endpoint-surfaced-$wkey" ] \
+    || fail "a failed append still claimed the shared endpoint episode"
+  [ ! -e "$state/.subsuper-seen-status-$key" ] \
+    || fail "a failed append still marked the terminal status seen"
+
+  # Buffer writable again: the same event must still reach the digest.
+  rmdir "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-lost-l1 · endpoint: gone' \
+    handle_wake "signal: $state/lost-l1.turn-ended" "$state"
+  grep -F 'task lost-l1 endpoint gone' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the retried event never reached the digest: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ -e "$state/.subsuper-seen-reconcile-$key" ] \
+    || fail "a successful append did not record the reconciliation dedupe marker"
+  [ -e "$state/.endpoint-surfaced-$wkey" ] \
+    || fail "a successful append did not claim the shared endpoint episode"
+  pass "a failed escalation append withholds every suppression marker and stays retryable"
+}
+
+test_classify_signal_skips_torn_down_task_files() {
+  # A wake queued just before teardown names paths that no longer exist.
+  # Regression: deliberately finished work must not be escalated as an orphan
+  # needing metadata recovery.
+  local dir state fakebin crew_state out
+  dir=$(make_supercase signal-torn-down)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no metadata for gone-d4' \
+    classify_signal "$state/gone-d4.turn-ended" "$state")
+  case "$out" in self\|*) ;; *) fail "a torn-down task's vanished wake was escalated: $out" ;; esac
+  assert_not_contains "$out" "recommended recovery:" "a torn-down task produced a recovery recommendation"
+
+  # A file that still exists is still reconciled.
+  fm_write_meta "$state/live-d5.meta" "window=sess:fm-live-d5" "kind=ship"
+  : > "$state/live-d5.turn-ended"
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-live-d5 · endpoint: gone' \
+    classify_signal "$state/live-d5.turn-ended" "$state")
+  case "$out" in escalate\|*) ;; *) fail "an existing orphan turn-end stopped escalating: $out" ;; esac
+  pass "classify_signal skips wake files removed by teardown while still reconciling live ones"
+}
+
+test_housekeeping_unreadable_endpoint_escalates() {
+  # The wedge recheck used to drop its marker when the pane could not be read,
+  # so a crew whose endpoint died while the timer ran was silently dropped. It
+  # must now escalate - but only after the loss is confirmed across consecutive
+  # rechecks, because one failed capture is a backend round-trip blip, not proof.
+  local dir state fakebin key
+  dir=$(make_supercase stale-endpoint-unreadable)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/orphan-w9.meta" "window=sess:fm-orphan-w9" "kind=ship"
+  printf 'working: building\n' > "$state/orphan-w9.status"
+  key=$(printf '%s' "orphan-w9" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+
+  # First unreadable recheck: not yet proof. Nothing escalated, and the marker is
+  # kept so the recheck repeats instead of dropping the task.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "one failed capture escalated a relaunch recommendation: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "the stale marker was dropped before the loss was confirmed"
+
+  # Second consecutive unreadable recheck: now confirmed.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] || fail "a confirmed unreadable endpoint was silently dropped by the stale recheck"
+  # The episode record is shared with the watcher's endpoint poll. Whichever
+  # detector confirms first must write it, or the other repeats the same
+  # recovery recommendation into the same digest.
+  [ -e "$state/.endpoint-surfaced-$(printf '%s' "sess:fm-orphan-w9" | tr ':/.' '___')" ] \
+    || fail "the daemon escalated an endpoint loss without recording the shared episode"
+  grep -F 'task orphan-w9 endpoint unreadable' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the unreadable-endpoint escalation did not carry its task id"
+  grep -F 'last reported: working: building' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the unreadable-endpoint escalation did not carry what the task last reported"
+  grep -F 'recommended recovery:' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the unreadable-endpoint escalation carried no recovery guidance"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "the stale marker survived the unreadable-endpoint escalation"
+  pass "housekeeping escalates an unreadable endpoint only after consecutive rechecks confirm the loss"
+}
+
+test_housekeeping_recovered_endpoint_resets_miss_count() {
+  # A crew whose pane is readable again clears the miss count, so a later blip
+  # cannot ride on top of an old one and reach the threshold prematurely.
+  local dir state fakebin key wkey pane
+  dir=$(make_supercase stale-endpoint-recovered)
+  state="$dir/state"; fakebin="$dir/fakebin"; pane="$dir/pane.txt"
+  fm_write_meta "$state/blip-w10.meta" "window=sess:fm-blip-w10" "kind=ship"
+  printf 'working: building\n' > "$state/blip-w10.status"
+  printf 'esc to interrupt\n' > "$pane"
+  key=$(printf '%s' "blip-w10" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-blip-w10" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ -e "$state/.subsuper-endpoint-miss-$wkey" ] || fail "the first unreadable recheck recorded no miss count"
+
+  # Pane readable and busy again: the crew is alive, so the miss count resets.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ ! -e "$state/.subsuper-endpoint-miss-$wkey" ] || fail "a recovered endpoint did not reset its miss count"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a recovered endpoint was escalated: $(cat "$state/.subsuper-escalations")"
+  pass "a readable endpoint resets the consecutive-miss count so blips cannot accumulate"
+}
+
+test_housekeeping_miss_count_requires_consecutive_rechecks() {
+  # The miss count means CONSECUTIVE unreadable rechecks. Regression: one old
+  # blip must not survive a refreshed wedge timer and pair with an unrelated
+  # later blip to "confirm" a loss for a crew that is alive and running.
+  local dir state fakebin key wkey
+  dir=$(make_supercase stale-endpoint-nonconsecutive)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/live-w12.meta" "window=sess:fm-live-w12" "kind=ship"
+  printf 'working: building\n' > "$state/live-w12.status"
+  key=$(printf '%s' "live-w12" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-live-w12" | tr ':/.' '___')
+
+  # Tick 1: aged wedge timer plus one transient capture blip.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ -e "$state/.subsuper-endpoint-miss-$wkey" ] || fail "the first unreadable recheck recorded no miss count"
+
+  # Tick 2: a stale wake refreshed the timer, so this tick performs no probe at
+  # all. That breaks the run - the blip above is no longer consecutive with
+  # anything that follows.
+  date +%s > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ ! -e "$state/.subsuper-endpoint-miss-$wkey" ] \
+    || fail "a tick that never probed kept the old miss count alive"
+
+  # Tick 3: the timer ages out again and an unrelated single blip occurs. With a
+  # correct consecutive rule this is only the FIRST miss, so nothing is confirmed.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "two non-consecutive blips confirmed a lost endpoint for a live crew: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.endpoint-surfaced-$wkey" ] \
+    || fail "a live crew's episode was marked surfaced, suppressing the watcher's own detector"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "the genuine wedge timer was dropped along with the false confirmation"
+  pass "the endpoint miss count only accumulates across back-to-back rechecks"
+}
+
+test_housekeeping_declared_pause_resets_miss_count() {
+  # A declared external pause skips the probe too, so it must end the run.
+  local dir state fakebin key wkey
+  dir=$(make_supercase stale-endpoint-pause-reset)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/held-w13.meta" "window=sess:fm-held-w13" "kind=ship"
+  printf 'working: building\n' > "$state/held-w13.status"
+  key=$(printf '%s' "held-w13" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-held-w13" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ -e "$state/.subsuper-endpoint-miss-$wkey" ] || fail "the first unreadable recheck recorded no miss count"
+
+  printf 'working: building\npaused: awaiting the vendor rate-limit reset\n' > "$state/held-w13.status"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=2 housekeeping "$state"
+  [ ! -e "$state/.subsuper-endpoint-miss-$wkey" ] \
+    || fail "a declared pause kept a stale miss count alive"
+  pass "a declared external pause ends the endpoint miss run instead of preserving it"
+}
+
+test_reconciliation_endpoint_loss_shares_the_episode_record() {
+  # Endpoint loss can be confirmed by no-verb reconciliation, by the daemon's
+  # stale recheck, or by the watcher's poll. Regression: whichever gets there
+  # first must record the shared episode, and the others must defer, or one lost
+  # endpoint puts two relaunch recommendations in the same digest.
+  local dir state fakebin crew_state out wkey
+  dir=$(make_supercase reconcile-endpoint-episode)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  crew_state=$(make_fake_crew_state "$fakebin")
+  fm_write_meta "$state/orphan-r4.meta" "window=sess:fm-orphan-r4" "kind=ship"
+  printf 'working: building\n' > "$state/orphan-r4.status"
+  : > "$state/orphan-r4.turn-ended"
+  wkey=$(printf '%s' "sess:fm-orphan-r4" | tr ':/.' '___')
+
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone: sess:fm-orphan-r4 · endpoint: gone' \
+    handle_wake "signal: $state/orphan-r4.turn-ended" "$state"
+  grep -F 'task orphan-r4 endpoint gone' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a lost endpoint was not escalated by reconciliation: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ -e "$state/.endpoint-surfaced-$wkey" ] \
+    || fail "reconciliation escalated a lost endpoint without recording the shared episode"
+  : > "$state/.subsuper-escalations"
+
+  # The daemon's stale recheck must now defer to it rather than repeat it.
+  local key
+  key=$(printf '%s' "orphan-r4" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "the stale recheck repeated an endpoint loss reconciliation already surfaced: $(cat "$state/.subsuper-escalations")"
+
+  # A crew that reconciles as working again ends the episode's miss run.
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating · endpoint: alive' \
+    handle_wake "signal: $state/orphan-r4.turn-ended" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a recovered crew was escalated: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-endpoint-miss-$wkey" ] \
+    || fail "a crew reconciling as working left its endpoint miss run in place"
+  pass "no-verb reconciliation participates in the shared endpoint-loss episode record"
+}
+
+test_housekeeping_endpoint_advice_is_kind_aware() {
+  # The stale recheck is the third endpoint-loss detector. Its recovery wording
+  # has to come from the same shared formatter as the other two, or a dead
+  # secondmate is sent to recover from a worktree it does not have.
+  local dir state fakebin key
+  dir=$(make_supercase stale-endpoint-secondmate)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/sec-w16.meta" "window=sess:fm-sec-w16" "kind=secondmate" "home=$dir/home"
+  printf 'working: supervising its own fleet\n' > "$state/sec-w16.status"
+  key=$(printf '%s' "sec-w16" | tr ':/.' '___')
+
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 housekeeping "$state"
+
+  grep -F 'task sec-w16 endpoint unreadable' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the secondmate's lost endpoint was not escalated: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  grep -F 'relaunch it in its recorded firstmate home' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the stale recheck gave a secondmate crewmate recovery wording: $(cat "$state/.subsuper-escalations")"
+  grep -F 'worktree' "$state/.subsuper-escalations" >/dev/null \
+    && fail "the stale recheck named a worktree the secondmate does not have: $(cat "$state/.subsuper-escalations")"
+  pass "the stale recheck's endpoint advice comes from the shared kind-aware formatter"
+}
+
+test_housekeeping_tolerates_an_unusable_miss_threshold() {
+  # Both endpoint detectors read FM_ENDPOINT_MISS_POLLS. The watcher falls back
+  # on an unusable value; if the daemon did not, its arithmetic test would error
+  # and the stale-recheck endpoint escalation would be permanently disabled while
+  # the watcher kept confirming - the two silently applying different thresholds.
+  local dir state fakebin key
+  dir=$(make_supercase stale-endpoint-bad-threshold)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/badcfg-w15.meta" "window=sess:fm-badcfg-w15" "kind=ship"
+  printf 'working: building\n' > "$state/badcfg-w15.status"
+  key=$(printf '%s' "badcfg-w15" | tr ':/.' '___')
+
+  # Two back-to-back unreadable rechecks, which is the default threshold.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=lots housekeeping "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=lots housekeeping "$state"
+
+  grep -F 'task badcfg-w15 endpoint unreadable' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "an unusable miss threshold disabled the daemon's endpoint detector: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  pass "an unusable miss threshold falls back instead of disabling the daemon's endpoint detector"
+}
+
+test_housekeeping_defers_to_the_watcher_endpoint_wake() {
+  # The watcher's own endpoint-liveness poll already wakes firstmate with a
+  # richer message. One lost endpoint must not put two lines in the same digest.
+  local dir state fakebin key wkey
+  dir=$(make_supercase stale-endpoint-already-surfaced)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/dup-w11.meta" "window=sess:fm-dup-w11" "kind=ship"
+  printf 'working: building\n' > "$state/dup-w11.status"
+  key=$(printf '%s' "dup-w11" | tr ':/.' '___')
+  wkey=$(printf '%s' "sess:fm-dup-w11" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  : > "$state/.endpoint-surfaced-$wkey"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ENDPOINT_MISS_POLLS=1 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "the stale recheck duplicated an endpoint loss the watcher already surfaced: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "the stale marker was left behind after deferring to the watcher"
+  pass "the stale recheck defers to an endpoint loss the watcher already surfaced"
 }
 
 test_classify_stale_dedup_against_signal() {
@@ -1717,6 +2390,26 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
+test_classify_signal_mixed_wake_reconciles_the_other_task
+test_classify_signal_mixed_wake_drops_already_escalated_status
+test_classify_signal_reconciliation_dedup
+test_classify_signal_reconciliation_respects_escalated_terminal
+test_reconciliation_before_catch_all_marks_the_terminal_seen
+test_reconciliation_carries_the_terminal_it_retires
+test_reconciliation_frames_a_retired_blocker_as_a_blocker
+test_reconciliation_suppression_survives_a_tabbed_status_line
+test_housekeeping_append_failure_preserves_detector_state
+test_housekeeping_pause_recheck_append_failure_keeps_the_window
+test_failed_escalate_append_withholds_suppression
+test_classify_signal_skips_torn_down_task_files
+test_housekeeping_unreadable_endpoint_escalates
+test_housekeeping_recovered_endpoint_resets_miss_count
+test_housekeeping_miss_count_requires_consecutive_rechecks
+test_housekeeping_declared_pause_resets_miss_count
+test_reconciliation_endpoint_loss_shares_the_episode_record
+test_housekeeping_endpoint_advice_is_kind_aware
+test_housekeeping_tolerates_an_unusable_miss_threshold
+test_housekeeping_defers_to_the_watcher_endpoint_wake
 test_classify_stale_dedup_against_signal
 test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending
