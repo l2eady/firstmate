@@ -31,11 +31,15 @@
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch, active or terminal
 #      (from `axi status`, or the coarse `no-mistakes runs` fallback)?
-#      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
-#      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
-#      the active step is ci, `axi status` alone cannot tell "still waiting on
-#      checks" from "checks green, waiting on merge" (see nm_ci_checks_state).
+#      The run-step is AUTHORITATIVE while the endpoint is not actively busy:
+#      running/fixing -> working, ci -> working, awaiting_approval/fix_review
+#      -> parked (with gate findings), terminal passed/checks-passed -> done,
+#      failed/cancelled -> failed. A live busy endpoint can supersede only a
+#      completed/no-CI outcome because the run record can lag a crew that has
+#      resumed work; failed/cancelled outcomes remain captain-visible.
+#      EXCEPT: while the active step is ci, `axi status` alone cannot tell
+#      "still waiting on checks" from "checks green, waiting on merge" (see
+#      nm_ci_checks_state).
 #      The firstmate-side GitHub check verifies a no-CI result after a short
 #      grace and reports it as `no CI checks available`, never as checks green.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
@@ -711,14 +715,28 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # A terminal run record can be older than the agent endpoint: after the
+  # pipeline recorded completion, the crew may have resumed to resolve a rebase
+  # or another launch-boundary issue. The busy pane is the positive live-work
+  # signal already used by the no-run fallback, so let it override only terminal
+  # run states. An idle or closed endpoint leaves truthful terminal reporting
+  # unchanged.
+  case "$RUN_STATE" in
+    done|no-ci)
+      if [ "$KIND" != secondmate ] && [ -n "$BACKEND_TARGET" ] && crew_pane_is_busy "$BACKEND_TARGET"; then
+        emit working pane "harness busy (terminal run-step superseded)"
+      fi
+      ;;
+  esac
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------
-# The run-step path above already handled any crew with a run, regardless of pane
-# liveness, so a finished-but-pane-closed crew never reaches here. Down here there
-# is no run to consult, so a dead/unreadable target means the crew is gone: report
-# unknown rather than trusting a possibly-stale status log as the current state.
+# The run-step path above already handled any crew with a run, except that a live
+# busy endpoint can supersede a terminal outcome. A finished-but-pane-closed crew
+# therefore still reports its terminal run-step. Down here there is no run to
+# consult, so a dead/unreadable target means the crew is gone: report unknown
+# rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 if [ "$RECONCILE_ENDPOINT" != 1 ]; then
   pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"

@@ -110,7 +110,7 @@ BASE_REF=$(resolve_base_ref) \
 # tmux-only conformance run the tmux adapter's behavior is what is under test,
 # and that is unchanged by any later (e.g. non-tmux backend) addition to
 # fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-guard.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-tasks-axi-lib.sh fm-lock-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
+OLD_BIN_UNCHANGED_SIBLINGS="fm-guard.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-tasks-axi-lib.sh fm-lock-lib.sh fm-backend-hometag-lib.sh fm-resource-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
@@ -750,6 +750,21 @@ case "\${1:-}" in
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    for arg in "\$@"; do
+      case "\$arg" in
+        *.fm-spawn-*)
+          marker=\${arg##*: > }
+          marker=\${marker%%;*}
+          marker=\${marker#"'"}
+          marker=\${marker%"'"}
+          [ -z "\$marker" ] || : > "\$marker"
+          launch_script=\$(printf '%s\\n' "\$arg" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
+          [ -z "\$launch_script" ] || : > "\${launch_script%.sh}"
+          ;;
+      esac
+    done
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -820,6 +835,21 @@ case "\${1:-}" in
     ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    for arg in "\$@"; do
+      case "\$arg" in
+        *.fm-spawn-*)
+          marker=\${arg##*: > }
+          marker=\${marker%%;*}
+          marker=\${marker#"'"}
+          marker=\${marker%"'"}
+          [ -z "\$marker" ] || : > "\$marker"
+          launch_script=\$(printf '%s\\n' "\$arg" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
+          [ -z "\$launch_script" ] || : > "\${launch_script%.sh}"
+          ;;
+      esac
+    done
+    exit 0 ;;
 esac
 exit 0
 SH

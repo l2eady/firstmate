@@ -4,6 +4,8 @@
 # fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
 # gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
 # meta. The resource ownership preparation creates the root before the task can use it.
+# Teardown also carries a narrow compatibility proof for supported pre-manifest
+# task roots, while arbitrary untagged roots remain protected.
 #
 # These tests exercise behavior directly: fm-teardown is run as a subprocess against a
 # fake FM_HOME/FM_ROOT (built so the real script resolves into it), with stub helper scripts.
@@ -25,8 +27,13 @@ pass() {
 }
 
 TMP_ROOT=
+LEGACY_TMP_PATHS=()
 
 cleanup() {
+  local path
+  for path in "${LEGACY_TMP_PATHS[@]:-}"; do
+    [ -n "$path" ] && [ -e "$path" ] && find "$path" -depth -delete
+  done
   if [ -n "${TMP_ROOT:-}" ]; then
     rm -rf "$TMP_ROOT"
   fi
@@ -158,6 +165,23 @@ test_teardown_removes_tasktmp_dir() {
   pass "fm-teardown removes the dir pointed to by tasktmp= in meta"
 }
 
+test_teardown_removes_supported_legacy_untagged_tasktmp_only() {
+  local id=td-legacy-untagged-z5
+  local task_tmp="/tmp/fm-$id" unrelated="/tmp/fm-unrelated-untagged-z6" fake teardown_output
+  LEGACY_TMP_PATHS+=("$task_tmp" "$unrelated")
+  mkdir -p "$task_tmp/gotmp" "$unrelated/gotmp"
+  fake=$(make_fake_root "$id" "$task_tmp")
+  # Simulate the supported pre-manifest lifecycle: tasktmp= and gotmp existed,
+  # but no owner marker or resource_manifest was written yet.
+  mv "$task_tmp/.fm-resource-owner" "$TMP_ROOT/$id.marker"
+  teardown_output=$(FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1) \
+    || { printf '%s\n' "$teardown_output" >&2; fail "legacy supported task teardown exited non-zero"; }
+  [ ! -e "$task_tmp" ] || fail "supported legacy task temp root survived teardown"
+  [ ! -e "$fake/state/$id.meta" ] || fail "legacy teardown left task metadata behind"
+  [ -d "$unrelated" ] || fail "teardown removed an unrelated untagged temp root"
+  pass "teardown cleans the exact supported legacy task root and protects unrelated untagged roots"
+}
+
 test_teardown_skips_gracefully_without_tasktmp() {
   # Backward compat: a meta from a pre-fix task has no tasktmp= line. Teardown must
   # not error and must not remove anything.
@@ -217,5 +241,6 @@ test_teardown_skips_gracefully_when_dir_missing() {
 
 test_spawn_contract_and_mkdir_pattern
 test_teardown_removes_tasktmp_dir
+test_teardown_removes_supported_legacy_untagged_tasktmp_only
 test_teardown_skips_gracefully_without_tasktmp
 test_teardown_skips_gracefully_when_dir_missing

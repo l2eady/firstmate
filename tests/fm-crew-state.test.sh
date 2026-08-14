@@ -13,13 +13,15 @@
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
-#   (e) cross-branch attribution: this branch's own run found via list lookup
-#   (f) no run + busy pane                                        -> pane
-#   (g) no run + idle pane falls to the status-log verb           -> status-log
-#   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
-#   (i) kind=scout skips the run lookup                           -> pane/status-log
-#   (j) torn-down worktree / missing meta                         -> unknown/none
-#   (k) crew_is_provably_working end-to-end over the REAL helper (not a canned
+#   (e) live busy pane supersedes a stale terminal run             -> pane
+#   (f) live busy pane does not hide a failed run                   -> run-step
+#   (g) cross-branch attribution: this branch's own run found via list lookup
+#   (h) no run + busy pane                                        -> pane
+#   (i) no run + idle pane falls to the status-log verb           -> status-log
+#   (j) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
+#   (k) kind=scout skips the run lookup                           -> pane/status-log
+#   (l) torn-down worktree / missing meta                         -> unknown/none
+#   (m) crew_is_provably_working end-to-end over the REAL helper (not a canned
 #       fake fm-crew-state.sh verdict): cross-branch attribution via the runs
 #       list -> absorbed; genuinely no run anywhere + idle pane -> surfaced.
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
@@ -764,6 +766,40 @@ test_terminal_passed() {
   pass "terminal passed run is authoritative"
 }
 
+# A terminal run record can lag a crew that has resumed in its live endpoint.
+# The positive busy signal must win over the old outcome, while the idle case
+# above and the closed-pane case below continue to report the terminal run.
+test_live_busy_endpoint_supersedes_terminal_run() {
+  reset_fakes
+  local d; d=$(new_case live-busy-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-live-busy
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-live-busy.meta" "window=fm:fm-feat-live-busy" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-live-busy)"
+  FM_FAKE_BUSY=1
+  local out; out=$(run_crew_state "$d" feat-live-busy)
+  assert_contains "$out" "state: working" "a live busy endpoint must override a stale terminal run outcome"
+  assert_contains "$out" "source: pane" "the live busy endpoint must be the current-state source"
+  assert_contains "$out" "terminal run-step superseded" "the override must explain why the terminal run was not trusted"
+  assert_not_contains "$out" "state: done" "a live busy endpoint must not be classified terminal"
+  pass "live busy endpoint supersedes a stale terminal run while idle/closed endpoints retain terminal reporting"
+}
+
+test_live_busy_endpoint_does_not_hide_failed_run() {
+  reset_fakes
+  local d; d=$(new_case live-busy-failed)
+  make_repo_on_branch "$d/wt" fm/feat-live-busy-failed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-live-busy-failed.meta" "window=fm:fm-feat-live-busy-failed" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-live-busy-failed)"
+  FM_FAKE_BUSY=1
+  local out; out=$(run_crew_state "$d" feat-live-busy-failed)
+  assert_contains "$out" "state: failed" "a live busy endpoint must not hide a failed run"
+  assert_contains "$out" "source: run-step" "a failed run must remain the authoritative source"
+  assert_not_contains "$out" "state: working" "a live busy endpoint must not rewrite a failed run as working"
+  pass "live busy endpoint does not hide a failed terminal run"
+}
+
 test_terminal_failed() {
   reset_fakes
   local d; d=$(new_case failed)
@@ -1300,6 +1336,8 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_live_busy_endpoint_supersedes_terminal_run
+test_live_busy_endpoint_does_not_hide_failed_run
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row

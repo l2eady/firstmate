@@ -147,6 +147,12 @@ TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 RESOURCE_MANIFEST=$(grep '^resource_manifest=' "$META" | cut -d= -f2- || true)
 RESOURCE_HOME=$(grep '^resource_home=' "$META" | cut -d= -f2- || true)
 RESOURCE_ROOT=$(grep '^resource_root=' "$META" | cut -d= -f2- || true)
+# Tasks spawned before resource manifests existed recorded only tasktmp=. The
+# resource library may use its narrow legacy compatibility proof for those
+# metas; modern manifests and marked roots still take the normal fail-closed
+# path.
+ALLOW_LEGACY_TASK_TMP=0
+[ -n "$RESOURCE_MANIFEST" ] || ALLOW_LEGACY_TASK_TMP=1
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
 
@@ -1140,7 +1146,7 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   [ -n "$RESOURCE_HOME" ] || RESOURCE_HOME=$HOME_PATH
   [ -n "$RESOURCE_ROOT" ] || RESOURCE_ROOT=$HOME_PATH
-  fm_resource_cleanup_task "$ID" "$RESOURCE_HOME" "$RESOURCE_ROOT" "$STATE" "$TASK_TMP" "$RESOURCE_MANIFEST" || {
+  fm_resource_cleanup_task "$ID" "$RESOURCE_HOME" "$RESOURCE_ROOT" "$STATE" "$TASK_TMP" "$RESOURCE_MANIFEST" "$ALLOW_LEGACY_TASK_TMP" || {
     echo "error: task resource cleanup failed for $ID; preserving resource metadata for fm-resource-gc.sh" >&2
     exit 1
   }
@@ -1149,7 +1155,7 @@ if [ "$KIND" = secondmate ]; then
 else
   [ -n "$RESOURCE_HOME" ] || RESOURCE_HOME=$FM_HOME
   [ -n "$RESOURCE_ROOT" ] || RESOURCE_ROOT=$FM_ROOT
-  fm_resource_cleanup_task "$ID" "$RESOURCE_HOME" "$RESOURCE_ROOT" "$STATE" "$TASK_TMP" "$RESOURCE_MANIFEST" || {
+  fm_resource_cleanup_task "$ID" "$RESOURCE_HOME" "$RESOURCE_ROOT" "$STATE" "$TASK_TMP" "$RESOURCE_MANIFEST" "$ALLOW_LEGACY_TASK_TMP" || {
     echo "error: task resource cleanup failed for $ID; preserving resource metadata for fm-resource-gc.sh" >&2
     exit 1
   }

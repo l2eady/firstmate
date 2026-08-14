@@ -31,7 +31,13 @@ case "${1:-}" in
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          marker=$(printf '%s\n' "$a" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
+          [ -z "$marker" ] || : > "$marker"
+          launch_script=$(printf '%s\n' "$a" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
+          if [ -n "$launch_script" ] && [ -f "$launch_script" ]; then
+            : > "${launch_script%.sh}"
+            tail -n +2 "$launch_script" >> "$FM_FAKE_LAUNCH_LOG"
+          fi
         fi
         prev=$a
       done

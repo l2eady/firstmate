@@ -15,6 +15,13 @@ The manifest and markers are written before the task endpoint receives its first
 The task environment exports the owner metadata and puts task-owned Docker and Chrome wrappers first in `PATH`.
 The wrappers derive the task identity from their installed task root and validate the durable manifest before forwarding a resource command.
 
+Tasks spawned by the supported lifecycle before resource manifests and markers
+were introduced recorded only `tasktmp=` and created the exact `/tmp/fm-<id>/gotmp`
+shape. Teardown has a narrow compatibility proof for that legacy shape: it is
+enabled only when the current metadata has no resource manifest, the root is the
+canonical `/tmp/fm-<id>` directory recorded for the task, it has a real `gotmp`
+child, and no modern marker exists. All other untagged roots remain preserved.
+
 ## Docker resources
 
 Direct Docker container, service, network, and volume creation through the task wrapper receives exact `com.firstmate.owner`, `com.firstmate.task`, `com.firstmate.home`, backend, and endpoint labels.

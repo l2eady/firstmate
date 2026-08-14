@@ -209,6 +209,14 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do case "$a" in *pane_current_command*) printf '%s\n' "${FM_TEST_PANE_CMD:-zsh}"; exit 0 ;; esac; done
     exit 0 ;;
+  send-keys)
+    printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
+    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
+    [ -z "$marker" ] || : > "$marker"
+    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
+    [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+    exit 0
+    ;;
   new-window|kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
     exit 0 ;;

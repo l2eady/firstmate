@@ -23,6 +23,18 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
+if [ "${1:-}" = terminal ] && [ "${2:-}" = send ]; then
+  text=
+  previous=
+  for arg in "$@"; do
+    [ "$previous" = --text ] && text=$arg
+    previous=$arg
+  done
+  marker=$(printf '%s\n' "$text" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
+  [ -z "$marker" ] || : > "$marker"
+  launch_script=$(printf '%s\n' "$text" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
+  [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+fi
 if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ]; then
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
   exit 0
@@ -500,10 +512,14 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
-  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
-    "spawn did not export GOTMPDIR through the Orca terminal"
-  assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
-    "spawn did not send the selected harness launch command through Orca"
+  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''.' \
+    "spawn did not submit the task-local prelude source command through Orca"
+  assert_grep "export GOTMPDIR='/tmp/fm-$id/gotmp'" "/tmp/fm-$id/.fm-spawn-prelude.sh" \
+    "spawn did not write GOTMPDIR to the task-local prelude script"
+  assert_contains "$(cat "$log")" ".fm-spawn-launch.sh" \
+    "spawn did not submit the task-local launch script through Orca"
+  assert_grep 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions' "/tmp/fm-$id/.fm-spawn-launch.sh" \
+    "spawn did not write the selected harness launch command to the task-local launch script"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
 }
@@ -665,16 +681,15 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
 }
 
 test_spawn_releases_orca_resources_when_metadata_write_fails() {
-  local proj wt data state_file config id out status
+  local proj wt data state_dir config id out status
   id="orcametafailz9"
   proj="$TMP_ROOT/meta-fail-project"
   wt="$TMP_ROOT/meta-fail-wt"
   data="$TMP_ROOT/meta-fail-data"
-  state_file="$TMP_ROOT/meta-fail-state-file"
+  state_dir="$TMP_ROOT/meta-fail-state"
   config="$TMP_ROOT/meta-fail-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  mkdir -p "$data/$id" "$config"
-  : > "$state_file"
+  mkdir -p "$data/$id" "$state_dir/$id.meta" "$config"
   printf 'brief\n' > "$data/$id/brief.md"
   orca_case meta-fail
   printf '1\n' > "$RESP/1.exit"
@@ -682,17 +697,17 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   printf '{"ok":true,"result":{"worktree":{"id":"wt-meta-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"handle":"term-meta-fail"}}}\n' > "$RESP/4.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state_file" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state_dir" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata cannot be written"
-  assert_contains "$out" "File exists" "spawn should fail at the state directory creation point"
+  assert_contains "$out" "Is a directory" "spawn should fail when the metadata path is a directory"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json' \
     "Orca spawn should close the recorded terminal when a later abort occurs"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should remove the recorded worktree when a later abort occurs"
-  assert_absent "$state_file/$id.meta" "metadata-write abort should not leave metadata after successful cleanup"
+  [ -d "$state_dir/$id.meta" ] || fail "metadata-write fixture directory should remain in place"
   pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
 }
 

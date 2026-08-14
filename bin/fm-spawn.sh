@@ -1121,30 +1121,74 @@ spawn_send_text_line() {  # <target> <text>
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
   esac
 }
+SPAWN_SUBMIT_RETRIES=${FM_SPAWN_SUBMIT_RETRIES:-3}
+SPAWN_SUBMIT_SLEEP=${FM_SPAWN_SUBMIT_SLEEP:-0.3}
+SPAWN_SUBMIT_SETTLE=${FM_SPAWN_SUBMIT_SETTLE:-0.3}
+spawn_send_text_submit() {  # <target> <text>
+  local target=$1 text=$2 verdict
+  # These spawn-time inputs target a brand-new shell before the harness launch,
+  # not an agent composer. Herdr and Orca expose an atomic shell-command call;
+  # use it here so a long command cannot be split across the shell's input
+  # buffer. Composer verification remains in force for the backends whose
+  # spawn path has no atomic shell-command primitive.
+  case "$BACKEND" in
+    herdr|orca)
+      spawn_send_text_line "$target" "$text" || {
+        echo "error: spawn could not submit input to $target ($BACKEND)" >&2
+        return 1
+      }
+      return 0
+      ;;
+  esac
+  verdict=$(fm_backend_send_text_submit "$BACKEND" "$target" "$text" \
+    "$SPAWN_SUBMIT_RETRIES" "$SPAWN_SUBMIT_SLEEP" "$SPAWN_SUBMIT_SETTLE" "$W") || {
+    echo "error: spawn could not submit input to $target ($BACKEND)" >&2
+    return 1
+  }
+  case "$verdict" in
+    empty|unknown) return 0 ;;  # a fresh task shell has no agent composer to classify
+    pending)
+      echo "error: spawn input remains pending in $target ($BACKEND); refusing to append another command" >&2
+      return 1
+      ;;
+    send-failed)
+      echo "error: spawn input was not sent to $target ($BACKEND)" >&2
+      return 1
+      ;;
+    *)
+      echo "error: spawn received an invalid submit verdict '$verdict' from $BACKEND" >&2
+      return 1
+      ;;
+  esac
+}
+spawn_wait_for_file() {  # <path> <description>
+  local path=$1 description=$2
+  for _ in $(seq 1 30); do
+    [ -f "$path" ] && return 0
+    sleep 0.1
+  done
+  echo "error: spawn did not observe $description acknowledgement at $path" >&2
+  return 1
+}
+spawn_write_script() {  # <path> <body>
+  local path=$1 body=$2
+  [ ! -L "$path" ] || {
+    echo "error: spawn helper path is a symbolic link: $path" >&2
+    return 1
+  }
+  [ ! -e "$path" ] || [ -f "$path" ] || {
+    echo "error: spawn helper path is not a regular file: $path" >&2
+    return 1
+  }
+  (umask 077; printf '%s\n' "$body" > "$path") || return 1
+  chmod 700 "$path"
+}
 spawn_current_path() {  # <target>
   case "$BACKEND" in
     tmux) fm_backend_tmux_current_path "$1" ;;
     herdr) fm_backend_herdr_current_path "$1" ;;
     zellij) fm_backend_zellij_current_path "$1" "$W" ;;
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
-  esac
-}
-spawn_send_literal() {  # <target> <text>
-  case "$BACKEND" in
-    tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
-    herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
-    zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
-    orca) fm_backend_orca_send_literal "$1" "$2" ;;
-    cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
-  esac
-}
-spawn_send_key() {  # <target> <key>
-  case "$BACKEND" in
-    tmux) fm_backend_tmux_send_key "$1" "$2" ;;
-    herdr) fm_backend_herdr_send_key "$1" "$2" ;;
-    zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
-    orca) fm_backend_orca_send_key "$1" "$2" ;;
-    cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$REUSE_RECORDED_WORKTREE" -eq 0 ]; then
@@ -1410,19 +1454,31 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-while IFS= read -r resource_env_line; do
-  [ -n "$resource_env_line" ] || continue
-  spawn_send_text_line "$T" "$resource_env_line"
-done <<EOF
-$RESOURCE_ENV
-EOF
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
-spawn_send_key "$T" Enter
+# Export GOTMPDIR and the task-owned resource environment through a task-local
+# script. The terminal receives only a short source command, so a long export
+# line cannot remain partly buffered or be duplicated around COMPOSE_PROJECT_NAME.
+# The shared submit primitive still types that short command once, retries Enter
+# only, and never appends the launch while the input is still positively pending.
+PRELUDE_MARKER="$TASK_TMP/.fm-spawn-prelude"
+PRELUDE_MARKER_Q=$(shell_quote "$PRELUDE_MARKER")
+PRELUDE_SCRIPT="$TASK_TMP/.fm-spawn-prelude.sh"
+PRELUDE_SCRIPT_Q=$(shell_quote "$PRELUDE_SCRIPT")
+PRELUDE_BODY=$(printf 'export GOTMPDIR=%s\n%s' "$(shell_quote "$TASK_TMP/gotmp")" "$RESOURCE_ENV")
+spawn_write_script "$PRELUDE_SCRIPT" "$PRELUDE_BODY" || exit 1
+spawn_send_text_submit "$T" ". $PRELUDE_SCRIPT_Q && : > $PRELUDE_MARKER_Q"
+spawn_wait_for_file "$PRELUDE_MARKER" "resource prelude" || exit 1
+
+# A shell-side acknowledgement closes the remaining fresh-pane ambiguity: an
+# inconclusive composer read on a bare shell is acceptable only after the shell
+# itself proved that the prelude executed. The marker is inside the task-owned
+# temp root and disappears with normal resource cleanup.
+LAUNCH_MARKER="$TASK_TMP/.fm-spawn-launch"
+LAUNCH_MARKER_Q=$(shell_quote "$LAUNCH_MARKER")
+LAUNCH_SCRIPT="$TASK_TMP/.fm-spawn-launch.sh"
+LAUNCH_SCRIPT_Q=$(shell_quote "$LAUNCH_SCRIPT")
+LAUNCH_BODY=$(printf ': > %s\n%s' "$LAUNCH_MARKER_Q" "$LAUNCH")
+spawn_write_script "$LAUNCH_SCRIPT" "$LAUNCH_BODY" || exit 1
+spawn_send_text_submit "$T" ". $LAUNCH_SCRIPT_Q"
+spawn_wait_for_file "$LAUNCH_MARKER" "launch" || exit 1
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

@@ -168,7 +168,14 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys) exit 0 ;;
+  send-keys)
+    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
+    [ -z "$marker" ] || : > "$marker"
+    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
+    [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+    exit 0
+    ;;
+  has-session|new-session|new-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -248,6 +255,13 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   new-window) printf '@spawnwid\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
+    [ -z "$marker" ] || : > "$marker"
+    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
+    [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+    exit 0
+    ;;
   has-session|new-session|send-keys|set-window-option) exit 0 ;;
 esac
 exit 0
@@ -302,7 +316,7 @@ test_spawn_ignores_transient_unrelated_paths() {
   assert_present "$wt/.claude/settings.local.json" "spawn did not configure the harness in the requested project's worktree"
   assert_absent "$unrelated/.claude/settings.local.json" "spawn configured the harness in the unrelated Git repository"
   last_cwd_line=$(grep -n '^cwd ' "$rec" | tail -n 1 | cut -d: -f1)
-  launch_line=$(grep -n 'send-keys .* -l .*claude' "$rec" | tail -n 1 | cut -d: -f1)
+  launch_line=$(grep -n -F '.fm-spawn-launch.sh' "$rec" | tail -n 1 | cut -d: -f1)
   [ -n "$last_cwd_line" ] && [ -n "$launch_line" ] && [ "$last_cwd_line" -lt "$launch_line" ] \
     || fail "harness launch did not occur after the correct worktree cwd was observed"
   assert_contains "$out" "worktree=$wt" "spawn result did not report the requested project's linked worktree"
@@ -387,7 +401,14 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   new-window) printf '%s\n' "@spawnwid"; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|send-keys|set-window-option) exit 0 ;;
+  send-keys)
+    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
+    [ -z "$marker" ] || : > "$marker"
+    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
+    [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+    exit 0
+    ;;
+  has-session|new-session|set-window-option) exit 0 ;;
 esac
 exit 0
 SH
@@ -454,7 +475,14 @@ case "${1:-}" in
     exit 0
     ;;
   new-window) printf '@spawnwid\n'; exit 0 ;;
-  list-windows|has-session|new-session|send-keys|set-window-option) exit 0 ;;
+  send-keys)
+    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
+    [ -z "$marker" ] || : > "$marker"
+    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
+    [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+    exit 0
+    ;;
+  list-windows|has-session|new-session|set-window-option) exit 0 ;;
 esac
 exit 0
 SH

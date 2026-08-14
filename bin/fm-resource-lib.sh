@@ -397,6 +397,48 @@ fm_resource_remove_task_tmp() {  # <id> <tasktmp> <owner> [<home> <root> <home-t
   fi
 }
 
+# fm_resource_remove_legacy_task_tmp: remove the pre-manifest GOTMPDIR root
+# created by the supported lifecycle before owner markers existed. This narrow
+# compatibility path is intentionally separate from fm_resource_remove_task_tmp:
+# generic cleanup must continue to preserve every untagged directory. A legacy
+# root is provable only when it is the canonical /tmp/fm-<id> directory recorded
+# for this task, has a real gotmp child, and has no modern owner marker.
+fm_resource_remove_legacy_task_tmp() {  # <id> <tasktmp> <owner> <home> <root>
+  local id=$1 tasktmp=$2 owner=$3 home=$4 root=$5 abs rc tmp_parent expected owner_expected
+  [ -n "$tasktmp" ] && { [ -e "$tasktmp" ] || [ -L "$tasktmp" ]; } || return 0
+  if abs=$(fm_resource_validate_task_tmp "$id" "$tasktmp" "$owner" "$home" "$root" 2>/dev/null); then
+    echo "resource: preserving task temp root with a modern owner marker but no manifest $tasktmp" >&2
+    return 2
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 2 ] || {
+    echo "resource: preserving unproven legacy task temp root $tasktmp" >&2
+    return "$rc"
+  }
+  abs=$(cd "$tasktmp" && pwd -P) || return 1
+  [ ! -e "$tasktmp/$FM_RESOURCE_OWNER_MARKER" ] && [ ! -L "$tasktmp/$FM_RESOURCE_OWNER_MARKER" ] || {
+    echo "resource: preserving task temp root with an owner marker but no manifest $tasktmp" >&2
+    return 2
+  }
+  tmp_parent=$(fm_resource_real_dir /tmp) || return 1
+  expected="$tmp_parent/fm-$id"
+  [ "$abs" = "$expected" ] || {
+    echo "resource: preserving unproven legacy task temp root $tasktmp" >&2
+    return 2
+  }
+  [ -d "$abs/gotmp" ] && [ ! -L "$abs/gotmp" ] || {
+    echo "resource: preserving unproven legacy task temp root $tasktmp" >&2
+    return 2
+  }
+  owner_expected=$(fm_resource_owner_for "$home" "$root" "$id") || return 1
+  [ "$owner" = "$owner_expected" ] || {
+    echo "resource: preserving legacy task temp root with mismatched owner $tasktmp" >&2
+    return 2
+  }
+  rm -rf -- "$abs"
+}
+
 fm_resource_docker_ids_for_label() {  # <resource-kind> <label-key> <label-value>
   local kind=$1 key=$2 value=$3
   case "$kind" in
@@ -630,10 +672,10 @@ fm_resource_chrome_cleanup() {  # <owner> <task> <home> <root> <home-tag> <taskt
   return 0
 }
 
-fm_resource_cleanup_task() {  # <id> <home> <root> <state> <tasktmp> [<manifest>]
-  local id=$1 home=$2 root=$3 state=$4 tasktmp=${5:-} manifest=${6:-}
+fm_resource_cleanup_task() {  # <id> <home> <root> <state> <tasktmp> [<manifest>] [<allow-legacy-tasktmp>]
+  local id=$1 home=$2 root=$3 state=$4 tasktmp=${5:-} manifest=${6:-} allow_legacy_tasktmp=${7:-0}
   local owner manifest_tmp manifest_home manifest_root backend= endpoint= compose= chrome_session= chrome_label= profile= chrome_owned= chrome_real= docker_used chrome_used service_used
-  local resource_home resource_root resource_home_abs resource_root_abs home_tag state_abs expected_manifest manifest_dir manifest_base
+  local resource_home resource_root resource_home_abs resource_root_abs home_tag state_abs expected_manifest manifest_dir manifest_base manifest_present=0
   state_abs=$(fm_resource_real_dir "$state") || return 1
   expected_manifest="$state_abs/$id$FM_RESOURCE_MANIFEST_SUFFIX"
   if [ -n "$manifest" ]; then
@@ -652,6 +694,7 @@ fm_resource_cleanup_task() {  # <id> <home> <root> <state> <tasktmp> [<manifest>
     return 1
   fi
   if [ -f "$manifest" ]; then
+    manifest_present=1
     fm_resource_validate_manifest "$id" "$state" "$manifest" || {
       echo "REFUSED: resource manifest $manifest is incomplete or mismatched" >&2
       return 1
@@ -711,7 +754,12 @@ fm_resource_cleanup_task() {  # <id> <home> <root> <state> <tasktmp> [<manifest>
   if [ -n "$profile" ] && [ -n "$chrome_session" ]; then
     fm_resource_chrome_cleanup "$owner" "$id" "$resource_home" "$resource_root" "$home_tag" "$tasktmp" "$chrome_session" "$profile" "$chrome_owned" "$chrome_used" "$chrome_real" || return 1
   fi
-  fm_resource_remove_task_tmp "$id" "$tasktmp" "$owner" "$resource_home" "$resource_root" "$home_tag" || return 1
+  if [ "$allow_legacy_tasktmp" = 1 ] && [ "$manifest_present" = 0 ] \
+    && [ -n "$tasktmp" ] && [ ! -e "$tasktmp/$FM_RESOURCE_OWNER_MARKER" ] && [ ! -L "$tasktmp/$FM_RESOURCE_OWNER_MARKER" ]; then
+    fm_resource_remove_legacy_task_tmp "$id" "$tasktmp" "$owner" "$resource_home" "$resource_root" || return 1
+  else
+    fm_resource_remove_task_tmp "$id" "$tasktmp" "$owner" "$resource_home" "$resource_root" "$home_tag" || return 1
+  fi
   rm -f "$manifest" "$manifest.docker-used" "$manifest.chrome-used" "$manifest.docker-service-used"
 }
 

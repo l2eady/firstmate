@@ -21,7 +21,14 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys|kill-window) exit 0 ;;
+  send-keys)
+    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
+    [ -z "$marker" ] || : > "$marker"
+    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
+    [ -z "$launch_script" ] || : > "${launch_script%.sh}"
+    exit 0
+    ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
 esac
 exit 0
 SH

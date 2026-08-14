@@ -24,7 +24,18 @@ make_fake_tmux() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  has-session|new-session|new-window|send-keys|kill-window)
+  send-keys)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    marker=$(printf '%s\n' "$*" | sed -n "s/.*: > '\\([^']*\\.fm-spawn-[^']*\\)'.*/\\1/p")
+    [ -z "$marker" ] || : > "$marker"
+    launch_script=$(printf '%s\n' "$*" | sed -n "s/.*\\. '\\([^']*\\.fm-spawn-launch\\.sh\\)'.*/\\1/p")
+    if [ -n "$launch_script" ] && [ -f "$launch_script" ]; then
+      : > "${launch_script%.sh}"
+      tail -n +2 "$launch_script" >> "$FM_FAKE_TMUX_LOG"
+    fi
+    exit 0
+    ;;
+  has-session|new-session|new-window|kill-window)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
     exit 0
     ;;
