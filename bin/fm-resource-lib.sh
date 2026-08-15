@@ -292,7 +292,8 @@ fm_resource_task_env_line() {  # <manifest>
   [ -n "$task" ] && [ -n "$owner" ] && [ -n "$tasktmp" ] || return 1
   printf 'export FM_TASK_ID=%s FM_TASK_RESOURCE_OWNER=%s FM_TASK_RESOURCE_HOME=%s FM_TASK_RESOURCE_HOME_TAG=%s FM_TASK_RESOURCE_MANIFEST=%s FM_TASK_RESOURCE_STATE=%s FM_TASK_RESOURCE_BACKEND=%s FM_TASK_RESOURCE_ENDPOINT=%s FM_RESOURCE_DOCKER_PROJECT=%s FM_RESOURCE_CHROME_SESSION=%s FM_RESOURCE_CHROME_LABEL=%s FM_RESOURCE_CHROME_PROFILE=%s FM_RESOURCE_CHROME_OWNED=%s\n' \
     "$(fm_resource_shell_quote "$task")" "$(fm_resource_shell_quote "$owner")" "$(fm_resource_shell_quote "$home")" "$(fm_resource_shell_quote "$tag")" "$(fm_resource_shell_quote "$manifest")" "$(fm_resource_shell_quote "$state")" "$(fm_resource_shell_quote "$backend")" "$(fm_resource_shell_quote "$endpoint")" "$(fm_resource_shell_quote "$compose")" "$(fm_resource_shell_quote "$chrome_session")" "$(fm_resource_shell_quote "$chrome_label")" "$(fm_resource_shell_quote "$profile")" "$(fm_resource_shell_quote "$chrome_owned")"
-  printf 'export PATH=%s:$PATH\n' "$(fm_resource_shell_quote "$(dirname "$tasktmp")/$(basename "$tasktmp")/bin")"
+  # shellcheck disable=SC2016 # The generated environment line expands PATH in the task shell, not here.
+  printf 'export PATH=%s:%s\n' "$(fm_resource_shell_quote "$(dirname "$tasktmp")/$(basename "$tasktmp")/bin")" '$PATH'
   printf 'export COMPOSE_PROJECT_NAME=%s FM_RESOURCE_REAL_DOCKER=%s FM_RESOURCE_REAL_CHROME=%s\n' \
     "$(fm_resource_shell_quote "$compose")" "$(fm_resource_shell_quote "$docker_real")" "$(fm_resource_shell_quote "$chrome_real")"
   if [ "$chrome_owned" = 1 ]; then
@@ -512,7 +513,7 @@ EOF
 
 _fm_resource_docker_cleanup_kinds() {  # <owner> <task> <compose> <require> <home-tag> <backend> <endpoint> <service-used> <kinds...>
   local owner=$1 task=$2 compose=$3
-  local require_daemon=0 expected_home= expected_backend= expected_endpoint= service_used=0
+  local require_daemon=0 expected_home='' expected_backend='' expected_endpoint='' service_used=0
   [ "$#" -ge 4 ] && require_daemon=$4
   [ "$#" -ge 5 ] && expected_home=$5
   [ "$#" -ge 6 ] && expected_backend=$6
@@ -584,7 +585,7 @@ EOF
 }
 
 fm_resource_docker_cleanup() {  # <owner> <task> <compose-project> <require-daemon> [<home-tag> <backend> <endpoint> <service-used>]
-  local require_daemon=0 home_tag= backend= endpoint= service_used=0
+  local require_daemon=0 home_tag='' backend='' endpoint='' service_used=0
   [ "$#" -ge 4 ] && require_daemon=$4
   [ "$#" -ge 5 ] && home_tag=$5
   [ "$#" -ge 6 ] && backend=$6
@@ -594,7 +595,7 @@ fm_resource_docker_cleanup() {  # <owner> <task> <compose-project> <require-daem
 }
 
 fm_resource_docker_cleanup_noncontainers() {  # <owner> <task> <compose-project> <require-daemon> [<home-tag> <backend> <endpoint> <service-used>]
-  local require_daemon=0 home_tag= backend= endpoint= service_used=0
+  local require_daemon=0 home_tag='' backend='' endpoint='' service_used=0
   [ "$#" -ge 4 ] && require_daemon=$4
   [ "$#" -ge 5 ] && home_tag=$5
   [ "$#" -ge 6 ] && backend=$6
@@ -674,7 +675,7 @@ fm_resource_chrome_cleanup() {  # <owner> <task> <home> <root> <home-tag> <taskt
 
 fm_resource_cleanup_task() {  # <id> <home> <root> <state> <tasktmp> [<manifest>] [<allow-legacy-tasktmp>]
   local id=$1 home=$2 root=$3 state=$4 tasktmp=${5:-} manifest=${6:-} allow_legacy_tasktmp=${7:-0}
-  local owner manifest_tmp manifest_home manifest_root backend= endpoint= compose= chrome_session= chrome_label= profile= chrome_owned= chrome_real= docker_used chrome_used service_used
+  local owner manifest_tmp manifest_home manifest_root backend='' endpoint='' compose='' chrome_session='' chrome_label='' profile='' chrome_owned='' chrome_real='' docker_used chrome_used service_used
   local resource_home resource_root resource_home_abs resource_root_abs home_tag state_abs expected_manifest manifest_dir manifest_base manifest_present=0
   state_abs=$(fm_resource_real_dir "$state") || return 1
   expected_manifest="$state_abs/$id$FM_RESOURCE_MANIFEST_SUFFIX"

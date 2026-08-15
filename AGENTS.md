@@ -627,7 +627,7 @@ Do not assume one primary harness can use another harness's foreground or backgr
 For example, Claude uses a background-notify cycle, while Codex intentionally uses bounded foreground checkpoints.
 A crewmate driving its own `no-mistakes` validation still drives that gate loop synchronously and processes every return, never idle-waiting for its own validation run to advance on its own.
 
-Token discipline: for a crewmate's current state prefer `bin/fm-crew-state.sh <id>`, which looks for a branch-matched run-step before checking pane liveness, then falls back to the pane and log in that cheap-first order and treats the status log's last line as a wake event rather than the current state; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
+Token discipline: for a crewmate's current state prefer `bin/fm-crew-state.sh <id>`, whose header owns the precedence among a branch-matched run, live endpoint, and wake-event log; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
 
 ### Away-mode stub

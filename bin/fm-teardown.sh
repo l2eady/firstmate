@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031
+# Backend adapters sourced inside subshell cleanup retain the caller's FM_ROOT and FM_HOME values.
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, refresh/prune the project's clone for PR-based ship

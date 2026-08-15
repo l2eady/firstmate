@@ -24,12 +24,13 @@ Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed 
 A declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.
 Crew status files are append-only wake-event logs, not current-state fields.
 Because they are append-only, a finished task's log still ends in a terminal verb, so teardown moves it to `data/status-archive/` and the catch-all fleet scan skips any status log whose task metadata is gone; otherwise settled history is re-read as fresh news on every scan.
-`bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes the matching no-mistakes run, active or terminal, to the crew's own branch and keeps that run-step authoritative even if the pane has closed.
+`bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it reconciles the matching no-mistakes run with the live endpoint according to the precedence owned by the script header.
+A positively busy endpoint supersedes a completed or no-CI run because the crew may have resumed work, while failed runs remain captain-visible and an idle or closed endpoint leaves the matching run authoritative.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
 When the ci log reports no checks, firstmate rechecks the recorded pull request through `gh-axi` after a short grace period and reports `state: no-ci` only after two confirmed no-check results.
 That no-CI state is distinct from `state: done` with `checks green`, while a failed, pending, unavailable, or ambiguous GitHub response remains working.
-Only when no matching run exists does it fall back to the pane busy-signature and then the status log; a dead pane without a run reports unknown instead of trusting a stale log.
+Without a matching run, it falls back to the pane busy-signature and then the status log; a dead pane without a run reports unknown instead of trusting a stale log.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
 For herdr, that pane fallback trusts a native `busy` verdict outright, but corroborates native `idle` or unknown verdicts against the rendered busy signature before deciding the crew is not working.
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, and secondmate return-channel guidance.

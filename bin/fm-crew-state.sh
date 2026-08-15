@@ -688,8 +688,8 @@ if [ "$HAVE_RUN" = 1 ]; then
   fi
   if [ "$RUN_STATE" = working ] && { log_reports_ci_ready || [ "$ci_status_log_no_ci" = 1 ]; }; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      RUN_STATE=done
-      RUN_OUTPUT_SOURCE=status-log
+      RUN_STATE='done'
+      RUN_OUTPUT_SOURCE='status-log'
       RUN_DETAIL="$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
@@ -705,8 +705,8 @@ if [ "$HAVE_RUN" = 1 ]; then
       RUN_OUTPUT_SOURCE=run-step
       RUN_DETAIL="no CI checks available: stop waiting for CI"
     elif [ "$ci_status_log_no_ci" = 0 ] && [ "$CI_LOG_STATE" != not-ready ]; then
-      RUN_STATE=done
-      RUN_OUTPUT_SOURCE=status-log
+      RUN_STATE='done'
+      RUN_OUTPUT_SOURCE='status-log'
       RUN_DETAIL="$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi

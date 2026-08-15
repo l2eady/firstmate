@@ -2,8 +2,8 @@
 # Behavior tests for per-task GOTMPDIR support (fm-gotmp).
 #
 # fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
-# gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
-# meta. The resource ownership preparation creates the root before the task can use it.
+# gotmp/ and records tasktmp= in the task's meta. The resource ownership preparation
+# creates the root before the task can use it.
 # Teardown also carries a narrow compatibility proof for supported pre-manifest
 # task roots, while arbitrary untagged roots remain protected.
 #

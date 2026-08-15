@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031
+# Backend adapters sourced inside command substitutions intentionally retain the caller's FM_ROOT and FM_HOME values.
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
