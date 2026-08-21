@@ -292,8 +292,9 @@ fm_resource_task_env_line() {  # <manifest>
   [ -n "$task" ] && [ -n "$owner" ] && [ -n "$tasktmp" ] || return 1
   printf 'export FM_TASK_ID=%s FM_TASK_RESOURCE_OWNER=%s FM_TASK_RESOURCE_HOME=%s FM_TASK_RESOURCE_HOME_TAG=%s FM_TASK_RESOURCE_MANIFEST=%s FM_TASK_RESOURCE_STATE=%s FM_TASK_RESOURCE_BACKEND=%s FM_TASK_RESOURCE_ENDPOINT=%s FM_RESOURCE_DOCKER_PROJECT=%s FM_RESOURCE_CHROME_SESSION=%s FM_RESOURCE_CHROME_LABEL=%s FM_RESOURCE_CHROME_PROFILE=%s FM_RESOURCE_CHROME_OWNED=%s\n' \
     "$(fm_resource_shell_quote "$task")" "$(fm_resource_shell_quote "$owner")" "$(fm_resource_shell_quote "$home")" "$(fm_resource_shell_quote "$tag")" "$(fm_resource_shell_quote "$manifest")" "$(fm_resource_shell_quote "$state")" "$(fm_resource_shell_quote "$backend")" "$(fm_resource_shell_quote "$endpoint")" "$(fm_resource_shell_quote "$compose")" "$(fm_resource_shell_quote "$chrome_session")" "$(fm_resource_shell_quote "$chrome_label")" "$(fm_resource_shell_quote "$profile")" "$(fm_resource_shell_quote "$chrome_owned")"
+  # Keep the inherited PATH as one quoted shell expansion owned by this serializer.
   # shellcheck disable=SC2016 # The generated environment line expands PATH in the task shell, not here.
-  printf 'export PATH=%s:%s\n' "$(fm_resource_shell_quote "$(dirname "$tasktmp")/$(basename "$tasktmp")/bin")" '$PATH'
+  printf 'export PATH=%s:%s\n' "$(fm_resource_shell_quote "$(dirname "$tasktmp")/$(basename "$tasktmp")/bin")" '"$PATH"'
   printf 'export COMPOSE_PROJECT_NAME=%s FM_RESOURCE_REAL_DOCKER=%s FM_RESOURCE_REAL_CHROME=%s\n' \
     "$(fm_resource_shell_quote "$compose")" "$(fm_resource_shell_quote "$docker_real")" "$(fm_resource_shell_quote "$chrome_real")"
   if [ "$chrome_owned" = 1 ]; then

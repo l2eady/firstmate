@@ -76,6 +76,8 @@ fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab se
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$ROOT/bin/fm-classify-lib.sh"
 
 # --- scratch world: a primary-shaped home, a secondmate-shaped home, two projects ---
 
@@ -117,6 +119,18 @@ assert_contains_local "$(cat "$CM1_META")" "backend=herdr" "cm1 meta missing bac
 WT1=$(grep '^worktree=' "$CM1_META" | cut -d= -f2-)
 CM1_PANE=$(grep '^herdr_pane_id=' "$CM1_META" | cut -d= -f2-)
 [ -n "$CM1_PANE" ] || fail "cm1 meta missing herdr_pane_id"
+[ "$(grep '^window=' "$CM1_META" | cut -d= -f2-)" = "$SESSION:$CM1_PANE" ] \
+  || fail "cm1 meta window did not preserve the canonical Herdr session:pane endpoint"
+CM1_WINDOW=$(grep '^window=' "$CM1_META" | cut -d= -f2-)
+fm_backend_target_exists herdr "$CM1_WINDOW" "fm-cm1" \
+  || fail "the canonical Herdr window endpoint from cm1.meta was not resolvable"
+for terminal_status in \
+  'done: canonical Herdr spawn completed' \
+  'failed: canonical Herdr spawn reported a terminal failure'; do
+  printf '%s\n' "$terminal_status" > "$PRIMARY_HOME/state/cm1.status"
+  stale_is_terminal "$CM1_WINDOW" "$PRIMARY_HOME/state" \
+    || fail "the existing watcher classifier did not classify '$terminal_status' as terminal"
+done
 pass "real herdr E2E: a primary-shaped home spawns a crewmate on the herdr backend"
 
 sleep 1
