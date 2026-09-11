@@ -1100,6 +1100,28 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+# Collect the task's own test-database leftovers before the worktree goes away.
+#
+# These containers carry the project's labels, not firstmate's, so fm_resource_cleanup_task below
+# never sees them. A crew that is SIGKILLed - which is how a wedged lane usually ends - never runs
+# its own trap either. That gap is how 1,185 orphaned Docker volumes accumulated and took the
+# machine down on 2026-08-26.
+#
+# The sweep is the project's own, so it keeps the project's ownership rules: it removes only
+# containers whose owner process is gone, keeps every live lane, and can never select a named
+# volume. It is advisory in both directions - a missing script, a stopped Docker daemon or a
+# non-zero exit must never turn a good teardown into a failed one.
+sweep_project_test_databases() {
+  local sweep
+  [ -n "$WT" ] && [ -d "$WT" ] || return 0
+  sweep="$WT/scripts/e2e_db_cleanup.sh"
+  [ -x "$sweep" ] || return 0
+  command -v docker >/dev/null 2>&1 || return 0
+  echo "teardown: sweeping orphaned test databases"
+  ( cd "$WT" && "$sweep" --orphans ) 2>&1 | sed 's/^/  /' || true
+  return 0
+}
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
@@ -1127,6 +1149,9 @@ fi
 if legacy_endpoint_is_live; then
   LEGACY_ENDPOINT_WAS_LIVE=1
 fi
+
+# Every refusal gate has passed, so the worktree is about to go: sweep while its scripts exist.
+sweep_project_test_databases
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then

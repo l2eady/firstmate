@@ -146,6 +146,64 @@ fleet_sync_relay_all_output() {
   done < "$tmp"
 }
 
+# Collect Docker test databases whose owning crew is gone.
+#
+# A crewmate that is SIGKILLed never runs its own cleanup trap, and its containers carry the
+# project's labels rather than firstmate's, so neither the crew's trap nor fm-teardown.sh's
+# resource cleanup necessarily reaches them. On 2026-08-26 that gap accumulated 1,185 orphaned
+# Docker volumes, filled a 926 GB disk and corrupted the daemon - every symptom of which read as a
+# load problem. Session start is the backstop: whatever a killed run left yesterday is collected
+# before today's fleet goes out.
+#
+# The sweep belongs to the project, not to firstmate, so the project keeps its own ownership rules
+# (owner-PID scoping, live lanes preserved, named volumes unreachable). Firstmate only decides when
+# to ask. Everything here is advisory: no Docker, no script, or a non-zero exit is silence, never a
+# failed bootstrap.
+TEST_DB_SWEEP_TIMEOUT="${FM_TEST_DB_SWEEP_TIMEOUT:-45}"
+
+test_database_sweep() {
+  local proj sweep out pid start elapsed removed monitor_was_on
+  [ -d "$PROJECTS" ] || return 0
+  command -v docker >/dev/null 2>&1 || return 0
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj" ] || continue
+    sweep="$proj/scripts/e2e_db_cleanup.sh"
+    [ -x "$sweep" ] || continue
+    out=$(mktemp "${TMPDIR:-/tmp}/fm-testdb-sweep.XXXXXX" 2>/dev/null) || continue
+    # Job control puts the subshell in its own process group, so a timeout can signal the whole
+    # tree - the sweep shells out to docker, and killing only the subshell leaves that client
+    # behind holding the pipe. Same idiom, and same save/restore, as fleet_sync below.
+    monitor_was_on=0
+    case $- in *m*) monitor_was_on=1 ;; esac
+    set -m 2>/dev/null || true
+    ( cd "$proj" && "$sweep" --orphans ) >"$out" 2>&1 &
+    pid=$!
+    start=$SECONDS
+    while kill -0 "$pid" 2>/dev/null; do
+      elapsed=$((SECONDS - start))
+      if [ "$elapsed" -ge "$TEST_DB_SWEEP_TIMEOUT" ]; then
+        kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        sleep 1
+        kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        echo "TESTDB_SWEEP: $(basename "$proj"): skipped: timed out after ${elapsed}s"
+        break
+      fi
+      sleep 1
+    done
+    wait "$pid" 2>/dev/null || true
+    [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+    # Quiet when there was nothing to collect; bootstrap's contract is silence when all is well.
+    # `grep -c` exits non-zero on no match, so a `|| echo 0` fallback would append a second line
+    # to a count that is already "0" and make the comparison below a syntax error.
+    removed=$(grep -c '^removed' "$out" 2>/dev/null) || removed=0
+    if [ "${removed:-0}" -gt 0 ]; then
+      echo "TESTDB_SWEEP: $(basename "$proj"): collected $removed orphan(s)"
+      sed 's/^/  /' "$out"
+    fi
+    rm -f "$out"
+  done
+}
+
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
   [ -d "$PROJECTS" ] || return 0
@@ -593,6 +651,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_liveness_sweep
   x_mode_setup
+  test_database_sweep
   fleet_sync
 fi
 exit 0

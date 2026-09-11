@@ -566,7 +566,11 @@ _fm_resource_docker_cleanup_kinds() {  # <owner> <task> <compose> <require> <hom
         return 1
       }
       case "$kind" in
-        container) docker rm -f "$cid" >/dev/null 2>&1 ;;
+        # -v: an image with a VOLUME declaration mints an anonymous volume per run, and that
+        # volume carries no ownership label of any kind - once the container is gone nothing
+        # can attribute it back. `rm -f` alone leaves it forever; on 2026-08-26 that class of
+        # orphan filled a 926 GB disk and corrupted the daemon.
+        container) docker rm -f -v "$cid" >/dev/null 2>&1 ;;
         service) docker service rm "$cid" >/dev/null 2>&1 ;;
         volume) docker volume rm "$cid" >/dev/null 2>&1 ;;
         network) docker network rm "$cid" >/dev/null 2>&1 ;;
