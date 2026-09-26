@@ -2,9 +2,11 @@
 # Behavior tests for fm-spawn.sh concrete dispatch profile flags.
 #
 # These tests drive fm-spawn through meta writing and launch construction with a
-# fake tmux pane and a real isolated git worktree. The fake tmux captures the
-# literal launch command sent with `tmux send-keys -l`, so assertions pin the
-# command firstmate would run without starting any real harness.
+# fake tmux pane and a real isolated git worktree. fm-spawn writes the launch
+# command as the last line of the task launch file and sends the pane one
+# `. '<launch file>'` line; the fake tmux logs that file's last line (and any
+# literal `send-keys -l` text), so assertions pin the command firstmate would
+# run without starting any real harness.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -33,6 +35,13 @@ case "${1:-}" in
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
+        case "$a" in
+          ". '"*"/launch.sh'")
+            launch_file=${a#". '"}
+            launch_file=${launch_file%"'"}
+            tail -n 1 "$launch_file" >> "$FM_FAKE_LAUNCH_LOG"
+            ;;
+        esac
         prev=$a
       done
     fi

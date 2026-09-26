@@ -231,6 +231,16 @@ make_spawn_sequence_fakebin() {
 #!/usr/bin/env bash
 set -u
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
+# fm-spawn launches by sourcing a task launch file; record its command line as
+# the literal launch text so ordering assertions can find the harness launch.
+for a in "$@"; do
+  case "$a" in
+    ". '"*"/launch.sh'")
+      f=${a#". '"}; f=${f%"'"}
+      [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux send-keys -t launch-file -l %s\n' "$(tail -n 1 "$f")" >> "$FM_TMUX_REC"
+      ;;
+  esac
+done
 case "$*" in
   *"#{pane_current_path}"*)
     count=$(cat "${FM_FAKE_PANE_COUNTER:?}" 2>/dev/null || printf '0')
@@ -380,6 +390,16 @@ make_spawn_record_fakebin() {
 #!/usr/bin/env bash
 set -u
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
+# fm-spawn launches by sourcing a task launch file; record its command line as
+# the literal launch text so ordering assertions can find the harness launch.
+for a in "$@"; do
+  case "$a" in
+    ". '"*"/launch.sh'")
+      f=${a#". '"}; f=${f%"'"}
+      [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux send-keys -t launch-file -l %s\n' "$(tail -n 1 "$f")" >> "$FM_TMUX_REC"
+      ;;
+  esac
+done
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -419,6 +439,16 @@ make_spawn_identity_fakebin() {
 #!/usr/bin/env bash
 set -u
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
+# fm-spawn launches by sourcing a task launch file; record its command line as
+# the literal launch text so ordering assertions can find the harness launch.
+for a in "$@"; do
+  case "$a" in
+    ". '"*"/launch.sh'")
+      f=${a#". '"}; f=${f%"'"}
+      [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux send-keys -t launch-file -l %s\n' "$(tail -n 1 "$f")" >> "$FM_TMUX_REC"
+      ;;
+  esac
+done
 target=
 previous=
 for arg in "$@"; do

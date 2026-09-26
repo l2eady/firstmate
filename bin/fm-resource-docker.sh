@@ -102,7 +102,7 @@ reject_reserved_labels() {
       --label)
         expect_value=1
         ;;
-      --label=com.firstmate.*|--label=com.firstmate.*=*)
+      --label=com.firstmate.*)
         echo "error: task cannot override firstmate Docker labels" >&2
         return 1
         ;;

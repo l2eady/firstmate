@@ -470,7 +470,7 @@ EOF
 
 _fm_resource_docker_cleanup_kinds() {  # <owner> <task> <compose> <require> <home-tag> <backend> <endpoint> <service-used> <kinds...>
   local owner=$1 task=$2 compose=$3
-  local require_daemon=0 expected_home= expected_backend= expected_endpoint= service_used=0
+  local require_daemon=0 expected_home='' expected_backend='' expected_endpoint='' service_used=0
   [ "$#" -ge 4 ] && require_daemon=$4
   [ "$#" -ge 5 ] && expected_home=$5
   [ "$#" -ge 6 ] && expected_backend=$6
@@ -542,7 +542,7 @@ EOF
 }
 
 fm_resource_docker_cleanup() {  # <owner> <task> <compose-project> <require-daemon> [<home-tag> <backend> <endpoint> <service-used>]
-  local require_daemon=0 home_tag= backend= endpoint= service_used=0
+  local require_daemon=0 home_tag='' backend='' endpoint='' service_used=0
   [ "$#" -ge 4 ] && require_daemon=$4
   [ "$#" -ge 5 ] && home_tag=$5
   [ "$#" -ge 6 ] && backend=$6
@@ -552,7 +552,7 @@ fm_resource_docker_cleanup() {  # <owner> <task> <compose-project> <require-daem
 }
 
 fm_resource_docker_cleanup_noncontainers() {  # <owner> <task> <compose-project> <require-daemon> [<home-tag> <backend> <endpoint> <service-used>]
-  local require_daemon=0 home_tag= backend= endpoint= service_used=0
+  local require_daemon=0 home_tag='' backend='' endpoint='' service_used=0
   [ "$#" -ge 4 ] && require_daemon=$4
   [ "$#" -ge 5 ] && home_tag=$5
   [ "$#" -ge 6 ] && backend=$6
@@ -632,7 +632,7 @@ fm_resource_chrome_cleanup() {  # <owner> <task> <home> <root> <home-tag> <taskt
 
 fm_resource_cleanup_task() {  # <id> <home> <root> <state> <tasktmp> [<manifest>]
   local id=$1 home=$2 root=$3 state=$4 tasktmp=${5:-} manifest=${6:-}
-  local owner manifest_tmp manifest_home manifest_root backend= endpoint= compose= chrome_session= chrome_label= profile= chrome_owned= chrome_real= docker_used chrome_used service_used
+  local owner manifest_tmp manifest_home manifest_root backend='' endpoint='' compose='' chrome_session='' chrome_label='' profile='' chrome_owned='' chrome_real='' docker_used chrome_used service_used
   local resource_home resource_root resource_home_abs resource_root_abs home_tag state_abs expected_manifest manifest_dir manifest_base
   state_abs=$(fm_resource_real_dir "$state") || return 1
   expected_manifest="$state_abs/$id$FM_RESOURCE_MANIFEST_SUFFIX"

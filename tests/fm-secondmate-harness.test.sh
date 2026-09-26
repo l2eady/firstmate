@@ -433,6 +433,13 @@ case "${1:-}" in
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
+        case "$a" in
+          ". '"*"/launch.sh'")
+            launch_file=${a#". '"}
+            launch_file=${launch_file%"'"}
+            tail -n 1 "$launch_file" >> "$FM_FAKE_LAUNCH_LOG"
+            ;;
+        esac
         prev=$a
       done
     fi

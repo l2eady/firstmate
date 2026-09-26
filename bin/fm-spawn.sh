@@ -1129,24 +1129,6 @@ spawn_current_path() {  # <target>
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
-spawn_send_literal() {  # <target> <text>
-  case "$BACKEND" in
-    tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
-    herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
-    zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
-    orca) fm_backend_orca_send_literal "$1" "$2" ;;
-    cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
-  esac
-}
-spawn_send_key() {  # <target> <key>
-  case "$BACKEND" in
-    tmux) fm_backend_tmux_send_key "$1" "$2" ;;
-    herdr) fm_backend_herdr_send_key "$1" "$2" ;;
-    zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
-    orca) fm_backend_orca_send_key "$1" "$2" ;;
-    cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
-  esac
-}
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$REUSE_RECORDED_WORKTREE" -eq 0 ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -1411,18 +1393,24 @@ if [ "$KIND" = secondmate ]; then
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-while IFS= read -r resource_env_line; do
-  [ -n "$resource_env_line" ] || continue
-  spawn_send_text_line "$T" "$resource_env_line"
-done <<EOF
+# process (go build, go test, ...) inherit it, then launch the agent. Everything
+# goes into one launch file in the task temp root and the pane receives a single
+# short `. <file>` line: typing several long lines while the freshly entered
+# worktree shell is still initialising let zsh's line editor interleave and
+# scramble the typeahead (2026-09-26/27, herdr and tmux alike), leaving the pane
+# in a broken continuation prompt instead of starting the agent.
+LAUNCH_FILE="$TASK_TMP/launch.sh"
+{
+  printf 'export GOTMPDIR=%s\n' "$(shell_quote "$TASK_TMP/gotmp")"
+  while IFS= read -r resource_env_line; do
+    [ -n "$resource_env_line" ] || continue
+    printf '%s\n' "$resource_env_line"
+  done <<EOF
 $RESOURCE_ENV
 EOF
+  printf '%s\n' "$LAUNCH"
+} > "$LAUNCH_FILE"
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
-spawn_send_key "$T" Enter
+spawn_send_text_line "$T" ". $(shell_quote "$LAUNCH_FILE")"
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

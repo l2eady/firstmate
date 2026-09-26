@@ -26,6 +26,16 @@ set -u
 case "${1:-}" in
   has-session|new-session|new-window|send-keys|kill-window)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    # fm-spawn launches by sourcing a task launch file; log its command line as
+    # the literal launch text so assertions can read what the pane would run.
+    for a in "$@"; do
+      case "$a" in
+        ". '"*"/launch.sh'")
+          f=${a#". '"}; f=${f%"'"}
+          printf 'send-keys -l %s\n' "$(tail -n 1 "$f")" >> "$FM_FAKE_TMUX_LOG"
+          ;;
+      esac
+    done
     exit 0
     ;;
   list-windows)
