@@ -13,11 +13,21 @@ herdr_refuse_if_default() { # <session>
 }
 
 herdr_safe_stop_and_delete() { # <session>
-  PATH="${FM_HERDR_TEST_REAL_PATH:-$PATH}" "${HERDR_LAB_HELPER:-$HERDR_TEST_SAFETY_DIR/bin/fm-herdr-lab.sh}" teardown "$1" || return 1
+  PATH="${FM_HERDR_TEST_REAL_PATH:-$PATH}" "${HERDR_LAB_HELPER:-$HERDR_TEST_SAFETY_DIR/bin/fm-herdr-lab.sh}" teardown "$1" || return "$?"
   if [ -n "${FM_HERDR_TEST_BRIDGE:-}" ]; then
     rm -f "$FM_HERDR_TEST_BRIDGE/herdr"
     rmdir "$FM_HERDR_TEST_BRIDGE"
   fi
+}
+
+herdr_test_cleanup_exit() {
+  local status=$1 cleanup_status=0
+  trap - EXIT
+  cleanup_all || cleanup_status=$?
+  if [ "$status" -eq 0 ]; then
+    status=$cleanup_status
+  fi
+  exit "$status"
 }
 
 # All real-test transport goes through the lab helper, including adapter status

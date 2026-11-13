@@ -29,7 +29,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 assert_contains_local() {  # <haystack> <needle> <msg>
   case "$1" in
@@ -59,10 +59,10 @@ ID="autodetectsmoke1"
 WT=
 cleanup_all() {
   [ -n "$WT" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT" >/dev/null 2>&1
-  herdr_safe_stop_and_delete "$SESSION"
+  herdr_safe_stop_and_delete "$SESSION" || return "$?"
   rm -rf "$TMP_ROOT"
 }
-trap cleanup_all EXIT
+trap 'herdr_test_cleanup_exit "$?"' EXIT
 herdr_test_lab_provision "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # --- scratch world: FM_HOME with NO backend config, one throwaway project ---
@@ -140,5 +140,4 @@ fi
 WT=
 pass "real herdr: teardown completes the auto-detected spawn/teardown cycle (meta cleared, pane closed)"
 
-cleanup_all
-trap - EXIT
+herdr_test_cleanup_exit 0
