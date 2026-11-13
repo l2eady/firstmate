@@ -13,8 +13,31 @@ SCRIPT_DIR=$(cd "$(dirname "$SOURCE_PATH")" && pwd -P)
 # shellcheck source=bin/fm-resource-lib.sh
 . "$SCRIPT_DIR/fm-resource-lib.sh"
 
+# Search executable PATH entries using bash's existing executable lookup, while
+# excluding this wrapper (including symlink aliases) and its task wrapper dir.
+safe_docker_candidate() {  # <path>
+  local candidate=$1 dir
+  [ -f "$candidate" ] && [ -x "$candidate" ] || return 1
+  [ ! "$candidate" -ef "$INVOKED_PATH" ] && [ ! "$candidate" -ef "$SOURCE_PATH" ] || return 1
+  dir=$(cd "$(dirname "$candidate")" && pwd -P) || return 1
+  [ "$dir" != "$TASK_TMP/bin" ]
+}
+
 REAL_DOCKER=${FM_RESOURCE_REAL_DOCKER:-}
-[ -n "$REAL_DOCKER" ] && [ -x "$REAL_DOCKER" ] && [ "$REAL_DOCKER" != "$0" ] || {
+case "$REAL_DOCKER" in
+  */*) safe_docker_candidate "$REAL_DOCKER" || REAL_DOCKER= ;;
+  '') ;;
+  *)
+    docker_name=$REAL_DOCKER
+    REAL_DOCKER=
+    while IFS= read -r candidate; do
+      safe_docker_candidate "$candidate" || continue
+      REAL_DOCKER=$candidate
+      break
+    done < <(type -a -P -- "$docker_name" 2>/dev/null || true)
+    ;;
+esac
+[ -n "$REAL_DOCKER" ] || {
   echo "error: firstmate Docker wrapper has no safe real Docker executable" >&2
   exit 127
 }
