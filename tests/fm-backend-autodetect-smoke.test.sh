@@ -63,7 +63,7 @@ cleanup_all() {
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+herdr_test_lab_provision "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # --- scratch world: FM_HOME with NO backend config, one throwaway project ---
 

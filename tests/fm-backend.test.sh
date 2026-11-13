@@ -927,7 +927,7 @@ run_teardown_case() {
 
 test_teardown_conformance_old_vs_new() {
   local old_bin fb proj wt id
-  local state_old state_new config_old config_new data log_old log_new expected_new out_old out_new rc_old rc_new
+  local state_old state_new config_old config_new data log_old log_new expected_new out_old out_new rc_old rc_new probe first
   old_bin=$(build_old_bin teardown-old)
   proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
   id="teardownconform1"
@@ -957,8 +957,13 @@ test_teardown_conformance_old_vs_new() {
   expect_code 0 "$rc_old" "old fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_old"
   expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
   expected_new="$TMP_ROOT/teardown-expected.log"
+  probe=$(printf 'tmux\x1fdisplay-message\x1f-p\x1f-t\x1ffirstmate:fm-%s\x1f#{pane_current_command}' "$id")
+  IFS= read -r first < "$log_old"
   {
-    printf 'tmux\x1fdisplay-message\x1f-p\x1f-t\x1ffirstmate:fm-%s\x1f#{pane_current_command}\n' "$id"
+    # Newer default-branch baselines already include the liveness proof.
+    # Preserve the whole observed command sequence, adding the proof only when
+    # comparing against an older baseline that does not yet perform it.
+    [ "$first" = "$probe" ] || printf '%s\n' "$probe"
     cat "$log_old"
   } > "$expected_new"
   diff -u "$expected_new" "$log_new" > "$TMP_ROOT/teardown-diff.txt" 2>&1 \

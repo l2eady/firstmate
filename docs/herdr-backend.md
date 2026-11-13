@@ -672,6 +672,42 @@ It now also attempts a configurable active alert independent of the supervisor b
 - **RESOLVED: a "paused / awaiting-external" crew state for the stale-wedge escalation.** Raised alongside the 2026-07-07 incident: an in-flight crew intentionally idling on a known external wait (a vendor rate limit, say) still tripped `bin/fm-supervise-daemon.sh`'s "stale persisted ... (possible wedge)" escalation exactly like a genuinely wedged crew, with no way to mark the wait as expected.
   Fixed by the `paused:` external-wait verb: a crew declares a deliberate wait, and both `bin/fm-watch.sh` and `bin/fm-supervise-daemon.sh` absorb its idle pane through the shared `bin/fm-classify-lib.sh` vocabulary (`status_is_paused`, `crew_absorb_class`, `FM_PAUSE_RESURFACE_SECS`), re-surfacing it for a recheck on a long cadence instead of a wedge escalation.
   See `AGENTS.md` section 8 and the crew-facing brief contract in `bin/fm-brief.sh`.
-- **Not implemented: mid-session secondmate liveness.** The `fm_backend_agent_alive`-driven respawn sweep (`bin/fm-bootstrap.sh`, see "Agent liveness probe reuses the husk classifier" above) only runs at session start.
-  A secondmate dying mid-session is a harder follow-on: the watcher deliberately exempts secondmates from stale-pane detection (an idle secondmate pane is healthy by design), so catching a mid-session death would need a periodic liveness beacon distinct from that exemption, not implemented here.
-  Deferred as a separate item - it changes the stale-classification/status vocabulary shared with `bin/fm-watch.sh` and `bin/fm-classify-lib.sh`, which is a bigger surface than this redelivery-loop fix should carry.
+- **Resolved: mid-session positive agent death.** The watcher probes recorded targets through the existing native liveness classifier independently of the secondmate stale-pane exemption; see the verification below.
+  Uncertain liveness remains inconclusive, and the watcher only queues recovery advice.
+
+## Readable shell after agent exit (2026-11-13)
+
+Verified with Herdr 0.8.0, protocol 19, and Codex CLI 0.168.0 in an isolated non-default lab provisioned and torn down exclusively through `bin/fm-herdr-lab.sh`.
+The helper's default-session fleet tripwire passed after every teardown.
+The lab used an isolated `FM_HOME`, recorded the lab endpoint in `state/dead.meta`, and left `paused: waiting for scheduled lab window` as the last status event.
+A transport bridge rejected every unscoped Herdr call and forwarded scoped reads through the helper's `run` entry point.
+
+Commands inside the lab (`$PANE` was `w1:p1`):
+
+```sh
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane run "$PANE" codex
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-text "$PANE" /quit
+# Wait 1.5 seconds for slash completion, then submit.
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" enter
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$PANE" --source recent --lines 80
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" agent get "$PANE"
+bin/fm-crew-state.sh --reconcile dead
+FM_POLL=0.2 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=999999 FM_CHECK_INTERVAL=999999 bin/fm-watch.sh
+```
+
+The pane remained readable at an ordinary shell prompt after Codex exited, while `agent get` returned:
+
+```json
+{"error":{"code":"agent_not_found","message":"agent target w1:p1 not found"},"id":"cli:agent:get"}
+```
+
+Before the fix, reconciliation returned `state: paused · source: status-log · waiting for scheduled lab window · endpoint: alive` and the AFK stale classifier returned `pause|paused (awaiting external), rechecked on a long cadence: paused: waiting for scheduled lab window`.
+After the fix, reconciliation returned `state: unknown · source: none · backend target gone: fm-lab-fm-afk-dead-crew-miss-d4-56216-28846:w1:p1 · endpoint: gone`.
+The watcher reclaimed a lab lock whose PID had exited, surfaced the initial status signal, then emitted the following independent positive-death check on re-arm:
+
+```text
+check: agent fm-lab-fm-afk-dead-crew-miss-d4-56216-28846:w1:p1: task dead agent confirmed dead for 2 consecutive polls despite readable pane; last reported: paused: waiting for scheduled lab window; recommended recovery: resume or relaunch from recorded metadata and worktree unless that last report shows the work already landed, then continue supervision
+```
+
+The existing AFK `classify_check` path escalates this immediately, without waiting for pause or wedge aging.
+`tests/fm-watch-triage.test.sh` covers positive death, dead watcher PID reclamation, live and unknown native verdicts, busy scrollback, pause precedence, and suppression across restart through executable interfaces.

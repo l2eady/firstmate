@@ -1213,6 +1213,7 @@ test_reconcile_transient_probe_failure_is_not_endpoint_loss() {
 # can return success with an empty pane id for a missing session/window target.
 # Exercise the installed tmux lifecycle so reconciliation proves endpoint
 # presence from observable target identity rather than process exit alone.
+# Keep a foreground process active: a bare shell is now positive agent death.
 test_reconcile_real_tmux_target_lifecycle() {
   reset_fakes
   local d real_tmux session window target out
@@ -1225,7 +1226,7 @@ test_reconcile_real_tmux_target_lifecycle() {
   fm_write_meta "$d/state/real-tmux-endpoint.meta" \
     "window=$target" "worktree=$d/wt" "kind=scout"
 
-  "$real_tmux" new-session -d -s "$session" -n "$window" \
+  "$real_tmux" new-session -d -s "$session" -n "$window" "sleep 60" \
     || fail "could not create the real tmux endpoint fixture"
   out=$(FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_ENDPOINT_RETRY_DELAY=0 \
     "$CREW_STATE" --reconcile real-tmux-endpoint)

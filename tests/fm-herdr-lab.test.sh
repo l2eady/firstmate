@@ -231,6 +231,27 @@ SH
   pass "fm-herdr-lab: timed-out provisioning cancels the launch before teardown"
 }
 
+test_real_test_bridge_stays_scoped() {
+  run_with_fake bash -c '
+    set -eu
+    . "$1/tests/herdr-test-safety.sh"
+    export HERDR_LAB_HELPER="$1/bin/fm-herdr-lab.sh"
+    session="fm-lab-bridge-$$"
+    trap "herdr_safe_stop_and_delete $session" EXIT
+    herdr_test_lab_provision "$session"
+    # The adapter version probe has no session flag, but the bridge supplies
+    # its one provisioned lab to the actual helper.
+    herdr status --json
+    herdr pane get w1:p1 --session "$session"
+    if herdr status --json --session default; then exit 1; fi
+    if herdr server live-handoff; then exit 1; fi
+    if herdr session delete "$session"; then exit 1; fi
+    if herdr session stop other-session; then exit 1; fi
+  ' _ "$ROOT" >/dev/null 2>&1 || fail 'real-test bridge escaped the helper or refused safe operations'
+  pass 'real-test bridge scopes version probes and subprocess calls while refusing foreign sessions and global operations'
+}
+
+test_real_test_bridge_stays_scoped
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction

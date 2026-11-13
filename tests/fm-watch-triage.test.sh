@@ -1834,6 +1834,64 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+test_readable_agent_death() {
+  local dir state fakebin out pid verdict
+  dir=$(make_case agent-death); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/out"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$1 ${2:-}" in
+  'status --json') printf '{"server":{"running":true}}' ;;
+  'pane get') printf '{"result":{"pane":{"pane_id":"w1:p1"}}}' ;;
+  'pane read') printf 'Working...\n' ;;
+  'agent get')
+    case "$(cat "$FM_AGENT_VERDICT")" in
+      alive) printf '{"result":{"agent":{"agent_status":"working"}}}' ;;
+      dead) printf '{"error":{"code":"agent_not_found"}}' >&2; exit 1 ;;
+      *) printf 'transport unavailable' >&2; exit 1 ;;
+    esac ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  fm_write_meta "$state/dead.meta" 'backend=herdr' 'window=fm-lab-fake:w1:p1' "worktree=$dir" 'kind=secondmate'
+  printf 'paused: scheduled wait\n' > "$state/dead.status"
+  seen_sig "$state/dead.status" > "$state/.seen-dead_status"
+  touch "$state/.afk"
+  # Native unknown and alive must not be turned into death by pane text.
+  for verdict in unknown alive; do
+    printf '%s' "$verdict" > "$dir/verdict"
+    watch_bg "$state" "$fakebin" "$out" env FM_AGENT_VERDICT="$dir/verdict" FM_PAUSE_RESURFACE_SECS=999999
+    pid=$!
+    wait_live "$pid" 25 || fail "$verdict liveness falsely surfaced: $(cat "$out")"
+    reap "$pid"
+  done
+  # The shell still renders old busy text; positive death must outrank it and
+  # the old pause, including after reclaiming a lock whose PID has exited.
+  sleep 0.01 & pid=$!; wait "$pid"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf dead > "$dir/verdict"
+  watch_bg "$state" "$fakebin" "$out" env FM_AGENT_VERDICT="$dir/verdict"
+  pid=$!
+  wait_for_exit "$pid" 60 || { reap "$pid"; fail 'readable dead agent was absorbed'; }
+  wait "$pid" || fail 'death watcher failed'
+  assert_contains "$(cat "$out")" 'agent confirmed dead for 2 consecutive polls' 'missing positive-death check'
+  assert_contains "$(cat "$out")" 'recorded firstmate home' 'lost secondmate recovery identity'
+  # Away mode must escalate the actual watcher output, without wedge aging.
+  verdict=$(FM_WEDGE_ALARM_EXEC=discard bash -c '. "$1/bin/fm-supervise-daemon.sh"; classify_check "$2"' _ "$ROOT" "$(cat "$out")")
+  case "$verdict" in escalate\|*) ;; *) fail 'away classifier absorbed agent death check' ;; esac
+  verdict=$(PATH="$fakebin:$PATH" FM_AGENT_VERDICT="$dir/verdict" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_ENDPOINT_RETRY_DELAY=0 "$ROOT/bin/fm-crew-state.sh" --reconcile dead)
+  assert_contains "$verdict" 'endpoint: gone' 'reconciliation still trusted readable shell'
+  # A restart must not re-enqueue a confirmed death already reported.
+  watch_bg "$state" "$fakebin" "$out" env FM_AGENT_VERDICT="$dir/verdict"
+  pid=$!
+  wait_live "$pid" 25 || fail 'confirmed death was spammed after restart'
+  reap "$pid"
+  pass 'readable agent death overrides busy text and pause, reclaims dead lock, escalates once, and reconciles gone'
+}
+
+
+test_readable_agent_death
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier

@@ -1383,6 +1383,8 @@ test_teardown_purges_supervision_markers() {
   : > "$case_dir/state/.subsuper-seen-status-task-x1"
   : > "$case_dir/state/.stale-fm-task-x1"
   : > "$case_dir/state/.wedge-escalations-fm-task-x1"
+  : > "$case_dir/state/.agent-miss-fm-task-x1"
+  : > "$case_dir/state/.agent-surfaced-fm-task-x1"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1392,7 +1394,8 @@ test_teardown_purges_supervision_markers() {
   expect_code 0 "$rc" "purge-markers: teardown should succeed"
   local leftover
   for leftover in .seen-task-x1_status .hb-surfaced-task-x1 .subsuper-seen-status-task-x1 \
-    .stale-fm-task-x1 .wedge-escalations-fm-task-x1; do
+    .stale-fm-task-x1 .wedge-escalations-fm-task-x1 \
+    .agent-miss-fm-task-x1 .agent-surfaced-fm-task-x1; do
     [ ! -e "$case_dir/state/$leftover" ] || \
       fail "purge-markers: $leftover survived teardown"
   done

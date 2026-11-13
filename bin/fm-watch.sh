@@ -32,6 +32,7 @@
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active.
 #   check: <script>: <out> per-task check output, always actionable
+#   check: agent <target>  confirmed positive agent death despite a readable shell
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -495,6 +496,36 @@ endpoint_miss_record() {  # <window> <task> [last-status-line] [kind]
   wake "$reason"
 }
 
+# A readable shell is not proof that its agent survived.
+# Keep positive death separate from capture failures; unknown breaks the
+# confirmation run, and only demonstrated life re-arms an already surfaced death.
+agent_liveness_check() {  # <window>
+  local win=$1 key verdict n prev at now task reason
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  verdict=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || verdict=unknown
+  case "$verdict" in
+    alive) rm -f "$STATE/.agent-miss-$key" "$STATE/.agent-surfaced-$key"; return ;;
+    dead) ;;
+    *) rm -f "$STATE/.agent-miss-$key"; return ;;
+  esac
+  now=$(date +%s)
+  n=0
+  if [ -r "$STATE/.agent-miss-$key" ]; then
+    read -r prev at < "$STATE/.agent-miss-$key" || true
+    case "${prev:-}:${at:-}" in *[!0-9:]*|:*|*:) prev=0; at=0 ;; esac
+    [ "$((now - at))" -le "$ENDPOINT_MISS_GAP" ] && n=$prev
+  fi
+  n=$((n + 1))
+  printf '%s %s' "$n" "$now" > "$STATE/.agent-miss-$key"
+  [ "$n" -ge "$ENDPOINT_MISS_POLLS" ] || return 0
+  [ ! -e "$STATE/.agent-surfaced-$key" ] || return 0
+  task=$(window_to_task "$win" "$STATE")
+  reason="check: agent $win: task $task agent confirmed dead for $n consecutive polls despite readable pane; last reported: $(last_status_line "$STATE/$task.status"); recommended recovery: $(endpoint_recovery_advice "$(window_kind "$win")")"
+  fm_wake_append check "agent-$key" "$reason" || exit 1
+  : > "$STATE/.agent-surfaced-$key"
+  wake "$reason"
+}
+
 # This poll's endpoint probe, kept so the stale layer below can reuse the capture
 # the liveness pass already took: probing earlier must not double the per-poll
 # round trips. Parallel indexed arrays keep this portable to the same bash the
@@ -645,6 +676,7 @@ while :; do
     if tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
       endpoint_cache_put "$w" "$tail40"
       endpoint_miss_clear "$w"
+      agent_liveness_check "$w"
     else
       task=$(window_to_task "$w" "$STATE")
       endpoint_miss_record "$w" "$task" "$(last_status_line "$STATE/$task.status")" "$(window_kind "$w")"
