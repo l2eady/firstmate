@@ -33,6 +33,9 @@
 #                          resume. Unless afk is active.
 #   check: <script>: <out> per-task check output, always actionable
 #   check: agent <target>  confirmed positive agent death despite a readable shell
+#   check: DISK: ...      low home-filesystem space (bin/fm-disk-lib.sh);
+#                          FM_DISK_CHECK_INTERVAL seconds between probes, one wake
+#                          per episode while recorded tasks exist
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -62,6 +65,8 @@ mkdir -p "$STATE"
 # see bin/fm-backend.sh and docs/herdr-backend.md.
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-disk-lib.sh
+. "$SCRIPT_DIR/fm-disk-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -561,6 +566,26 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( $(date +%s) - m ))
 }
 
+# Persist cadence and the low-space episode across actionable watcher exits.
+# Only a successful queue append suppresses a warning; recovery re-arms it.
+DISK_CHECK_INTERVAL=${FM_DISK_CHECK_INTERVAL:-300}
+case "$DISK_CHECK_INTERVAL" in ''|*[!0-9]*) DISK_CHECK_INTERVAL=300 ;; esac
+check_disk_space() {
+  local warning
+  [ "$(age_of "$STATE/.last-disk-check")" -ge "$DISK_CHECK_INTERVAL" ] || return 0
+  touch "$STATE/.last-disk-check"
+  warning=$(fm_disk_warning "$FM_HOME") || return 0
+  if [ -z "$warning" ]; then
+    rm -f "$STATE/.disk-low"
+    return 0
+  fi
+  [ ! -e "$STATE/.disk-low" ] || return 0
+  [ -n "$(recorded_windows)" ] || return 0
+  fm_wake_append check disk "check: $warning" || exit 1
+  : > "$STATE/.disk-low"
+  wake "check: $warning"
+}
+
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
 # Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
@@ -671,6 +696,7 @@ while :; do
   # unconfirmed indefinitely, which is exactly the orphan this check exists to
   # break. Each capture is cached for the stale layer, so the pane is still read
   # once per window per poll and the ordinary hash work stays where it was.
+  check_disk_space
   ENDPOINT_PROBED=0
   while IFS= read -r w; do
     if tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then

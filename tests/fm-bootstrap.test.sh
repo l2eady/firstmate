@@ -536,6 +536,42 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_disk_warning() {
+  local dir fakebin out gb kb
+  dir="$TMP_ROOT/disk-warning"
+  mkdir -p "$dir/home"
+  fakebin=$(make_fake_toolchain "$dir")
+  cat > "$fakebin/df" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = "-Pk $FM_HOME" ] || exit 1
+[ "${FM_FAKE_DISK_KB:-}" != failure ] || exit 1
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf 'fake 999999999 1 %s 1%% /home with spaces\n' "$FM_FAKE_DISK_KB"
+SH
+  chmod +x "$fakebin/df"
+  for gb in 50 '' invalid -1 0 99999999999999999999999 20; do
+    for kb in 48828124 48828125 48828126; do
+      out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+        FM_DISK_WARN_GB="$gb" FM_FAKE_DISK_KB="$kb" "$ROOT/bin/fm-bootstrap.sh")
+      if [ "$kb" = 48828124 ] && [ "$gb" != 20 ]; then
+        assert_contains "$out" 'DISK: low free space' "missing disk warning with threshold $gb"
+        assert_contains "$out" 'below 50 GB' 'invalid threshold did not default to 50 GB'
+        assert_contains "$out" 'inspect disk usage' 'disk warning has no action'
+      else
+        case "$out" in *DISK:*) fail "disk warning at or above threshold ($gb, $kb)" ;; esac
+      fi
+    done
+  done
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_DISK_WARN_GB=20 FM_FAKE_DISK_KB=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'below 20 GB' 'custom disk threshold ignored'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_DISK_KB=failure "$ROOT/bin/fm-bootstrap.sh")
+  case "$out" in *DISK:*) fail 'failed disk probe invented low space' ;; esac
+  pass 'bootstrap disk warning: decimal GB boundary, override, invalid fallback, failed probe, and action'
+}
+
+test_disk_warning
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_git_is_required_with_supported_install_instruction

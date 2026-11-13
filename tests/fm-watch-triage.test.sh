@@ -1890,8 +1890,41 @@ SH
   pass 'readable agent death overrides busy text and pause, reclaims dead lock, escalates once, and reconciles gone'
 }
 
+test_disk_crossing_episodes() {
+  local dir state fakebin out pid
+  dir=$(make_case disk-episodes); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/out"
+  fm_write_meta "$state/crew.meta" 'window=sess:fm-crew' 'kind=secondmate'
+  cat > "$fakebin/df" <<'SH'
+#!/usr/bin/env bash
+value=$(cat "$FM_DISK_PROBE")
+[ "$value" != failure ] || exit 1
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf 'fake 999999999 1 %s 1%% /\n' "$value"
+SH
+  chmod +x "$fakebin/df"
+  printf 48828124 > "$dir/disk"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_DISK_CHECK_INTERVAL=0 FM_DISK_PROBE="$dir/disk"
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail 'periodic low-disk warning missing'; }
+  wait "$pid" || fail 'low disk watcher failed'
+  assert_contains "$(cat "$out")" 'check: DISK: low free space' 'disk check not actionable'
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_DISK_CHECK_INTERVAL=0 FM_DISK_PROBE="$dir/disk"
+  pid=$!
+  wait_live "$pid" 15 || fail 'low disk repeated in same episode'
+  printf failure > "$dir/disk"
+  wait_live "$pid" 15 || fail 'failed disk probe emitted a wake'
+  [ -e "$state/.disk-low" ] || fail 'failed probe re-armed disk warning'
+  printf 48828125 > "$dir/disk"
+  wait_live "$pid" 15 || fail 'exact disk boundary emitted a warning'
+  [ ! -e "$state/.disk-low" ] || fail 'healthy disk did not reset episode'
+  printf 48828124 > "$dir/disk"
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail 'second disk crossing not reported'; }
+  wait "$pid" || fail 'second disk crossing failed'
+  pass 'watcher low-disk episodes persist across restarts, ignore failed probes, and re-arm at boundary'
+}
 
 test_readable_agent_death
+test_disk_crossing_episodes
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
