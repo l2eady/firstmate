@@ -264,6 +264,48 @@ test_labels_and_teardown_cleanup() {
   pass "tagged Docker, Chrome, and profile resources are cleaned by owner"
 }
 
+test_bare_docker_resolution() {
+  local home tasktmp manifest probe rc literal_command
+  # shellcheck disable=SC2016 # This must reach Docker literally, without host expansion.
+  literal_command='printf "$HOME"'
+  home=$(new_home bare-docker)
+  tasktmp="$TMP_ROOT/fm-resource-task"
+  manifest=$(prepare_task "$home" resource-task "$tasktmp")
+  probe="$home/probe"
+  mkdir -p "$probe" "$home/alias"
+  cat > "$probe/docker" <<'SH'
+#!/usr/bin/env bash
+printf '%s\0' "$@" > "$FM_DOCKER_ARGS"
+printf '%s' "$DOCKER_HOST" > "$FM_DOCKER_ENV"
+cat > "$FM_DOCKER_STDIN"
+exit 23
+SH
+  chmod +x "$probe/docker"
+  ln -s "$tasktmp/bin/docker" "$home/alias/docker"
+  rc=0
+  ( eval "$(fm_resource_task_env_line "$manifest")"
+    DOCKER_BIN=docker
+    printf 'input bytes\n' | env PATH="$home/alias:$tasktmp/bin:$probe:/usr/bin:/bin" \
+      FM_RESOURCE_REAL_DOCKER="$DOCKER_BIN" DOCKER_HOST=unix://test-only \
+      FM_DOCKER_ARGS="$home/args" FM_DOCKER_ENV="$home/env" FM_DOCKER_STDIN="$home/stdin" \
+      "$tasktmp/bin/docker" exec -i 'container with space' sh -c "$literal_command"
+  ) || rc=$?
+  [ "$rc" = 23 ] || fail "bare Docker name did not preserve exit status (got $rc)"
+  printf '%s\0' exec -i 'container with space' sh -c "$literal_command" > "$home/expected"
+  cmp "$home/args" "$home/expected" || fail "bare Docker name changed argument boundaries"
+  [ "$(cat "$home/env")" = unix://test-only ] || fail "Docker environment changed"
+  [ "$(cat "$home/stdin")" = 'input bytes' ] || fail "Docker stdin changed"
+  for probe in docker "$tasktmp/bin/docker" "$home/alias/docker" missing-docker; do
+    rc=0
+    ( eval "$(fm_resource_task_env_line "$manifest")"
+      env PATH="$home/alias:$tasktmp/bin:/usr/bin:/bin" FM_RESOURCE_REAL_DOCKER="$probe" "$tasktmp/bin/docker" ps
+    ) > "$home/error" 2>&1 || rc=$?
+    [ "$rc" = 127 ] || fail "unsafe Docker target $probe did not fail closed"
+    grep -F 'no safe real Docker executable' "$home/error" >/dev/null || fail "missing Docker resolution error"
+  done
+  pass "bare Docker resolution skips wrapper aliases and preserves args, env, stdin, exit, and fail-closed resolution"
+}
+
 test_untagged_temp_is_preserved() {
   local home id tasktmp owner
   home=$(new_home untagged)
@@ -414,6 +456,7 @@ export FAKEBIN DOCKER_STATE CHROME_LOG
 export FM_FAKE_DOCKER_STATE="$DOCKER_STATE" FM_FAKE_CHROME_LOG="$CHROME_LOG"
 
 test_labels_and_teardown_cleanup
+test_bare_docker_resolution
 test_untagged_temp_is_preserved
 test_home_scoped_temp_root_is_validated
 test_mismatched_docker_owner_is_preserved

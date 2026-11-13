@@ -115,9 +115,30 @@ if [ "${1:-}" = debug ] && [ "${2:-}" = models ]; then
   cat "$catalog"
   exit 0
 fi
+if [ -n "${FM_FAKE_HARNESS_LOG:-}" ]; then
+  printf 'codex\n' >> "$FM_FAKE_HARNESS_LOG"
+fi
 exit 0
 SH
   chmod +x "$fakebin/codex"
+}
+
+# fm_fake_harnesses <fakebin> isolates executable launch fixtures from installed
+# agents. FM_FAKE_HARNESS_LOG optionally records each launch; catalog queries
+# retain fm_fake_codex_catalog's behavior and do not count as launches.
+fm_fake_harnesses() {
+  local fakebin=$1 harness
+  fm_fake_codex_catalog "$fakebin"
+  for harness in claude opencode pi grok; do
+    cat > "$fakebin/$harness" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_FAKE_HARNESS_LOG:-}" ]; then
+  printf '%s\n' "${0##*/}" >> "$FM_FAKE_HARNESS_LOG"
+fi
+exit 0
+SH
+    chmod +x "$fakebin/$harness"
+  done
 }
 
 # --- deterministic git identity and fixtures --------------------------------

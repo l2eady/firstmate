@@ -231,6 +231,105 @@ SH
   pass "fm-herdr-lab: timed-out provisioning cancels the launch before teardown"
 }
 
+test_real_test_bridge_stays_scoped() {
+  # shellcheck disable=SC2016 # The child Bash process expands this literal script.
+  run_with_fake bash -c '
+    set -eu
+    . "$1/tests/herdr-test-safety.sh"
+    export HERDR_LAB_HELPER="$1/bin/fm-herdr-lab.sh"
+    session="fm-lab-bridge-$$"
+    cleanup_all() { herdr_safe_stop_and_delete "$session"; }
+    trap '\''herdr_test_cleanup_exit "$?"'\'' EXIT
+    herdr_test_lab_provision "$session"
+    # The adapter version probe has no session flag, but the bridge supplies
+    # its one provisioned lab to the actual helper.
+    herdr status --json
+    herdr pane get w1:p1 --session "$session"
+    if herdr status --json --session default; then exit 1; fi
+    if herdr server live-handoff; then exit 1; fi
+    if herdr session delete "$session"; then exit 1; fi
+    if herdr session stop other-session; then exit 1; fi
+  ' _ "$ROOT" >/dev/null 2>&1 || fail 'real-test bridge escaped the helper or refused safe operations'
+  pass 'real-test bridge scopes version probes and subprocess calls while refusing foreign sessions and global operations'
+}
+
+test_real_test_cleanup_status() {
+  local mode original changed status expected scratch name bridge
+  for mode in explicit trap; do
+    for original in 0 37; do
+      for changed in 0 1; do
+        scratch="$TMP_ROOT/cleanup-$mode-$original-$changed"
+        mkdir -p "$scratch"
+        status=0
+        run_with_fake bash -s -- "$ROOT" "$mode" "$original" "$changed" "$scratch" <<'SH' >/dev/null 2>&1 || status=$?
+set -u
+. "$1/tests/herdr-test-safety.sh"
+export HERDR_LAB_HELPER="$1/bin/fm-herdr-lab.sh"
+mode=$2 original=$3 changed=$4 scratch=$5
+session="fm-lab-cleanup-$$"
+cleanup_all() {
+  printf 'cleanup\n' >> "$scratch/cleanup.log"
+  herdr_safe_stop_and_delete "$session" || return "$?"
+  rm -f "$scratch/owned"
+}
+trap 'herdr_test_cleanup_exit "$?"' EXIT
+herdr_test_lab_provision "$session" || exit 41
+printf '%s\n' "$session" > "$scratch/session"
+printf '%s\n' "$FM_HERDR_TEST_BRIDGE" > "$scratch/bridge"
+touch "$scratch/owned"
+if [ "$changed" -eq 1 ]; then
+  printf '%s\n' '/changed/default.sock' > "$FM_FAKE_HERDR_STATE/default-socket"
+fi
+if [ "$mode" = explicit ]; then
+  herdr_test_cleanup_exit "$original"
+fi
+exit "$original"
+SH
+        printf '%s\n' '/Users/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+        expected=$original
+        if [ "$expected" -eq 0 ]; then expected=$changed; fi
+        expect_code "$expected" "$status" "$mode cleanup must preserve an existing failure or report a failed tripwire"
+        [ "$(cat "$scratch/cleanup.log")" = cleanup ] || fail "$mode cleanup ran more than once"
+        name=$(cat "$scratch/session")
+        bridge=$(cat "$scratch/bridge")
+        if [ "$changed" -eq 1 ]; then
+          assert_present "$TRIPWIRES/$name.fleet-state.json" "failed cleanup discarded its tripwire evidence"
+          assert_present "$bridge/herdr" "failed cleanup discarded its guarded bridge"
+          assert_present "$scratch/owned" "failed teardown continued to successful file cleanup"
+          rm -rf "$bridge"
+        else
+          assert_absent "$TRIPWIRES/$name.fleet-state.json" "successful cleanup retained its tripwire"
+          assert_absent "$bridge" "successful cleanup retained its bridge"
+          assert_absent "$scratch/owned" "successful teardown skipped file cleanup"
+        fi
+      done
+    done
+  done
+  pass 'real-test cleanup propagates tripwire failures through explicit exits and EXIT traps while retaining prior failures'
+}
+
+test_real_test_cleanup_retains_helper_status() {
+  local status=0
+  cat > "$TMP_ROOT/failed-teardown" <<'SH'
+#!/usr/bin/env bash
+exit 23
+SH
+  chmod +x "$TMP_ROOT/failed-teardown"
+  run_with_fake bash -s -- "$ROOT" "$TMP_ROOT/failed-teardown" <<'SH' >/dev/null 2>&1 || status=$?
+set -u
+. "$1/tests/herdr-test-safety.sh"
+export HERDR_LAB_HELPER=$2
+cleanup_all() { herdr_safe_stop_and_delete fm-lab-cleanup-status; }
+trap 'herdr_test_cleanup_exit "$?"' EXIT
+exit 0
+SH
+  expect_code 23 "$status" 'cleanup must retain the original helper failure status'
+  pass 'real-test cleanup preserves the helper failure status'
+}
+
+test_real_test_bridge_stays_scoped
+test_real_test_cleanup_status
+test_real_test_cleanup_retains_helper_status
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction

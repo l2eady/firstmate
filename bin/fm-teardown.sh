@@ -283,6 +283,7 @@ purge_supervision_markers() {  # <state-dir> <id> <window-target>
   [ -n "$win" ] || return 0
   win_key=$(printf '%s' "$win" | tr ':/.' '___')
   rm -f \
+    "$state_dir/.agent-miss-$win_key" "$state_dir/.agent-surfaced-$win_key" \
     "$state_dir/.hash-$win_key" "$state_dir/.count-$win_key" \
     "$state_dir/.stale-$win_key" "$state_dir/.stale-since-$win_key" \
     "$state_dir/.paused-$win_key" "$state_dir/.paused-rechecked-$win_key" \

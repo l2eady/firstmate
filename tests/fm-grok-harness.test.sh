@@ -32,6 +32,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_fake_harnesses "$fakebin"
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   printf '%s\n' "$fakebin"

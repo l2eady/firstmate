@@ -3,8 +3,8 @@
 #
 # These tests drive fm-spawn through meta writing and launch construction with a
 # fake tmux pane and a real isolated git worktree. The fake tmux captures the
-# literal launch command sent with `tmux send-keys -l`, so assertions pin the
-# command firstmate would run without starting any real harness.
+# literal launch command sent with `tmux send-keys -l` and executes it against
+# inert harness doubles, so no installed agent runtime is started.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -50,8 +50,8 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_codex_catalog "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_harnesses "$fakebin"
+  fm_fake_exit0 "$fakebin" treehouse custom-agent
   printf '%s\n' "$fakebin"
 }
 
@@ -141,6 +141,37 @@ assert_meta_profile() {
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+}
+
+# The trailing PATH entries model installed agents without ever running them.
+# Exercise the generated launch scripts, not just the captured command strings.
+test_launches_use_only_fixture_harnesses() {
+  local harness rec id out status fallback sentinel calls
+  fallback="$TMP_ROOT/installed-agents"
+  sentinel="$TMP_ROOT/installed-agent.calls"
+  mkdir -p "$fallback"
+  for harness in claude codex opencode pi grok; do
+    cat > "$fallback/$harness" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${0##*/}" >> "${FM_TEST_INSTALLED_AGENT_LOG:?}"
+exit 99
+SH
+    chmod +x "$fallback/$harness"
+  done
+  for harness in claude codex opencode pi grok; do
+    id="isolated-$harness-z1"
+    rec=$(make_spawn_case "isolation-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    calls="$CASE_DIR/harness.calls"
+    : > "$calls"
+    out=$(FM_FAKE_HARNESS_LOG="$calls" FM_TEST_INSTALLED_AGENT_LOG="$sentinel" \
+      PATH="$fallback:$PATH" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness fixture spawn should succeed: $out"
+    [ ! -e "$sentinel" ] || fail "$harness launch escaped to an installed-agent PATH entry"
+    [ "$(cat "$calls")" = "$harness" ] || fail "$harness fixture must execute exactly once"
+  done
+  pass "all five generated harness launches execute fixture doubles without PATH fallthrough"
 }
 
 test_no_profile_keeps_claude_launch_unchanged() {
@@ -622,6 +653,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_launches_use_only_fixture_harnesses
 test_no_profile_keeps_claude_launch_unchanged
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout

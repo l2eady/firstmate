@@ -19,9 +19,10 @@
 #
 # Internal supervisors use `fm-crew-state.sh --reconcile <id>` for turn-end and
 # stale-wake decisions. That mode probes the endpoint first, returns immediately
-# when it is gone or unrecorded, and appends `endpoint: alive` to the normal
-# bounded state read otherwise. Endpoint loss therefore cannot hide behind a
-# still-active run record. Loss is only concluded after a bounded re-probe
+# when it is gone, confirmed agent-less, or unrecorded, and appends
+# `endpoint: alive` to the normal bounded state read otherwise.
+# Endpoint loss therefore cannot hide behind a still-active run record.
+# Loss is only concluded after a bounded re-probe
 # (FM_CREW_STATE_ENDPOINT_RETRIES / FM_CREW_STATE_ENDPOINT_RETRY_DELAY), so a
 # transient backend round-trip failure does not recommend relaunching a live
 # crew. The default command and output remain unchanged for normal operator
@@ -179,6 +180,8 @@ BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   local pane_id
+  # Positive agent death outranks a readable shell and any old run or pause.
+  [ "$(fm_backend_agent_alive "$TASK_BACKEND" "$1" 2>/dev/null)" != dead ] || return 1
   case "$TASK_BACKEND" in
     tmux)
       pane_id=$(tmux display-message -p -t "$1" '#{pane_id}' 2>/dev/null) || return 1

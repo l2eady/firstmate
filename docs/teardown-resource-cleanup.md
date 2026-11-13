@@ -22,6 +22,7 @@ All other untagged roots remain preserved.
 
 ## Docker resources
 
+The wrapper's real-executable selection, including bare command names, is documented in the header of `bin/fm-resource-docker.sh`.
 Direct Docker container, service, network, and volume creation through the task wrapper receives exact `com.firstmate.owner`, `com.firstmate.task`, `com.firstmate.home`, backend, and endpoint labels.
 Docker Compose receives an exact generated `COMPOSE_PROJECT_NAME` containing the home tag and task id, which is the ownership marker for Compose-created resources.
 Teardown queries exact owner and Compose-project labels, re-inspects every candidate, and removes a resource only when the inspected labels still match the task owner or exact generated project.
