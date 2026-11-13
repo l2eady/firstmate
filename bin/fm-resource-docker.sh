@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Add firstmate ownership labels to Docker resources created by a task.
 # The wrapper is installed only inside a task-owned temporary root.
+# FM_RESOURCE_REAL_DOCKER accepts an executable path or a bare command name.
+# Bare names use executable PATH lookup, excluding this wrapper, its aliases,
+# and its task wrapper directory.
+# If no safe target exists, the wrapper exits 127 before forwarding.
 set -eu
 
 INVOKED_PATH=${BASH_SOURCE[0]}

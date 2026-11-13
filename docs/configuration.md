@@ -297,6 +297,12 @@ These paths need `jq` to build the JSON payload, but they run before token and n
 
 ## Environment variables
 
+Bootstrap and the watcher share the read-only home-filesystem probe in `bin/fm-disk-lib.sh`; its header owns the threshold format and invalid-value fallback.
+Bootstrap prints an actionable `DISK:` warning below the threshold even in detect-only mode.
+The watcher checks on `FM_DISK_CHECK_INTERVAL` and queues `check: DISK: ...` only while task endpoints are recorded, at most once per low-space episode across watcher restarts.
+A successful observation at or above the threshold re-arms the warning; failed probes neither warn nor clear an ongoing episode.
+These checks do not change retention or delete resources.
+
 Runtime tuning via environment variables (defaults shown):
 
 ```sh
@@ -328,8 +334,8 @@ FM_POLL=15              # seconds between watcher poll cycles; accepts a nonnega
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode poll shim)
-FM_DISK_WARN_GB=50     # positive integer decimal GB; home-filesystem warning threshold (bin/fm-disk-lib.sh)
-FM_DISK_CHECK_INTERVAL=300  # seconds between watcher disk probes; one check wake per low-space episode with recorded tasks
+FM_DISK_WARN_GB=50      # home-filesystem threshold; format and fallback: bin/fm-disk-lib.sh
+FM_DISK_CHECK_INTERVAL=300  # seconds between watcher disk probes; warning policy above
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
@@ -359,9 +365,9 @@ FM_CLASSIFY_DECISION_VERB=needs-decision  # leading status verb that hands a dec
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
 FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
-FM_ENDPOINT_MISS_POLLS=2           # consecutive unreadable probes of a recorded in-flight endpoint before it is treated as lost; shared by the watcher's per-poll liveness check and the away-mode daemon's stale recheck so both apply one threshold, and non-numeric values fall back to 2
-FM_ENDPOINT_MISS_GAP=              # seconds a previous endpoint miss stays part of the current run in the watcher; unset defaults to (FM_POLL + FM_SIGNAL_GRACE) * 3 with a floor of 3, i.e. several complete watcher cycles rather than several polls, because consecutive probes of one window are a whole signal-lingering cycle apart and a shorter window would expire the run on a signalling fleet before a dead endpoint could ever confirm; the bound still keeps the run recency-limited, so an old blip cannot pair with an unrelated later one and confirm a loss for a live crew
-FM_CREW_STATE_ENDPOINT_RETRIES=1   # extra endpoint re-probes fm-crew-state.sh --reconcile makes before concluding loss, so one transient backend round-trip failure never recommends relaunching a running crew
+FM_ENDPOINT_MISS_POLLS=2           # consecutive unreadable captures or positive agent-death probes before the watcher reports loss; also used by the away-mode daemon's endpoint recheck; non-numeric values fall back to 2
+FM_ENDPOINT_MISS_GAP=              # seconds a previous endpoint or agent-death miss stays in the watcher's confirmation run; unset defaults to (ceil(FM_POLL) + ceil(FM_SIGNAL_GRACE)) * 3, with a minimum of 3 even for explicit overrides; rationale: bin/fm-watch.sh
+FM_CREW_STATE_ENDPOINT_RETRIES=1   # extra endpoint/agent-liveness re-probes before fm-crew-state.sh --reconcile concludes loss
 FM_CREW_STATE_ENDPOINT_RETRY_DELAY=1  # seconds between those re-probes; 0 disables the wait, which is what the tests use
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)

@@ -5,7 +5,7 @@ It is the herdr equivalent of the tmux facts recorded in the `harness-adapters` 
 
 Herdr is [an agent-native terminal multiplexer](https://herdr.dev) with a socket API, CLI wrappers, and native per-pane agent-state detection.
 Verified against the real installed binary: herdr 0.7.1, protocol 14, macOS aarch64.
-Current real-herdr verification uses isolated `HERDR_SESSION` names plus the guarded teardown helper in `tests/herdr-test-safety.sh`.
+Current real-herdr verification uses the helper-backed transport in `tests/herdr-test-safety.sh`; see "Session targeting" below.
 A 2026-07-02 cleanup bug proved that `HERDR_SESSION` alone is not a safe way to target destructive session cleanup; see "Session targeting: the `--session` flag, not `HERDR_SESSION` alone" below.
 All real-herdr verification in this document uses isolated sessions and guarded cleanup; the captain's default herdr session and live tmux fleet were never intended targets.
 
@@ -279,12 +279,13 @@ The fix, verified against the real binary in an isolated session (both a genuine
 
 - The `--session <name>` GLOBAL FLAG reliably routes every herdr subcommand tried (`status`, `workspace *`, `tab *`, `pane *`, `agent *`, `server`, `session stop`/`delete`) to the named session, in either leading (`herdr --session <name> <subcommand>`) or trailing (`herdr <subcommand> ... --session <name>`) position - both verified to work identically.
 - `bin/backends/herdr.sh`'s `fm_backend_herdr_cli` helper wraps every herdr invocation in the adapter: it sets `HERDR_SESSION` (kept for cosmetic/forward-compat reasons - harmless, and it is what the client's own JSON echoes back) AND appends a trailing `--session <name>`, so every adapter call is correctly scoped regardless of what else is running on the machine.
-- For destructive session cleanup specifically, use `herdr session stop <name>` / `herdr session delete <name>` (the explicit-by-name forms - `<name>` is a REQUIRED positional argument, so herdr cannot resolve it ambiguously; herdr's own help text requires literally typing `default` to affect the default session), never the ambient `herdr server stop`. `bin/fm-herdr-lab.sh` now owns this guard as the single source of truth: `fm_herdr_lab_teardown` does the stop-then-delete, gated by a read-only hard guard (`fm_herdr_lab_refuse_if_default`, re-querying `herdr session list --json` immediately before EVERY stop/delete call, refusing on a literal `default` name, a not-found name, or `default:true`) as a second, independent layer that fails closed on any ambiguity. `tests/herdr-test-safety.sh` now sources that helper, so its `herdr_safe_stop_and_delete`/`herdr_refuse_if_default` names are thin delegating wrappers over the same owner.
+- Test session lifecycle, refuse-default guards, and fleet-state tripwire requirements are owned by the header of `bin/fm-herdr-lab.sh`; never substitute ambient `herdr server stop` for its guarded entry points.
 
-The same guard is now a first-class production helper, `bin/fm-herdr-lab.sh`, not just test scaffolding.
-It provisions an isolated never-`default` lab session (names must start with `fm-lab-`), runs every task command through `run <session> ...` with a mandatory trailing `--session` appended, and refuses caller-supplied `--session`, any leading option before the subcommand, and every server or session-lifecycle subcommand.
-Destructive teardown goes only through `teardown <session>` (or a deliberate mid-run `stop <session>`), each re-running the refuse-default check immediately before every stop and delete.
-It also adds a before/after fleet-state tripwire: `provision` records the live `default` session before creating the lab session, and `teardown` verifies that recorded state is byte-identical afterward before clearing it, treating any missing, stopped, or changed default session as a hard failure rather than a warning.
+`tests/herdr-test-safety.sh` provisions through that helper and installs a single-lab transport bridge for adapter calls and subprocesses, including unscoped status probes.
+The bridge rejects foreign session selectors and routes allowed transport through the helper's `run` entry point, with deliberate restart lifecycle routed through its guarded `stop` and `provision` entry points.
+Set `HERDR_LAB_HELPER` to select the verified helper; the checked-in `bin/fm-herdr-lab.sh` is the default.
+The tests install an EXIT trap before provisioning and propagate teardown or tripwire failures, preserving an existing nonzero test result and retaining evidence on failed cleanup.
+`tests/fm-herdr-lab.test.sh` covers bridge refusal and cleanup failure propagation with a fake client.
 Crewmate briefs for tasks that drive Herdr lifecycle get this exact contract embedded by scaffolding with `bin/fm-brief.sh --herdr-lab`; every crewmate brief scaffolded without the flag instead carries a loud not-enabled gate, because the scaffold cannot detect from the caller-supplied repo string whether the task will touch Herdr lifecycle.
 
 ## ID stability across a server restart
@@ -672,8 +673,7 @@ It now also attempts a configurable active alert independent of the supervisor b
 - **RESOLVED: a "paused / awaiting-external" crew state for the stale-wedge escalation.** Raised alongside the 2026-07-07 incident: an in-flight crew intentionally idling on a known external wait (a vendor rate limit, say) still tripped `bin/fm-supervise-daemon.sh`'s "stale persisted ... (possible wedge)" escalation exactly like a genuinely wedged crew, with no way to mark the wait as expected.
   Fixed by the `paused:` external-wait verb: a crew declares a deliberate wait, and both `bin/fm-watch.sh` and `bin/fm-supervise-daemon.sh` absorb its idle pane through the shared `bin/fm-classify-lib.sh` vocabulary (`status_is_paused`, `crew_absorb_class`, `FM_PAUSE_RESURFACE_SECS`), re-surfacing it for a recheck on a long cadence instead of a wedge escalation.
   See `AGENTS.md` section 8 and the crew-facing brief contract in `bin/fm-brief.sh`.
-- **Resolved: mid-session positive agent death.** The watcher probes recorded targets through the existing native liveness classifier independently of the secondmate stale-pane exemption; see the verification below.
-  Uncertain liveness remains inconclusive, and the watcher only queues recovery advice.
+- **Resolved: mid-session positive agent death** - see "Readable shell after agent exit" below for verification and `docs/architecture.md` ("Event-driven supervision") for the liveness contract.
 
 ## Readable shell after agent exit (2026-11-13)
 
