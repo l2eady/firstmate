@@ -46,6 +46,7 @@ fi
 [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
+  fm_fake_harnesses "$fb"
   chmod +x "$fb/orca"
   printf '%s\n' "$fb"
 }

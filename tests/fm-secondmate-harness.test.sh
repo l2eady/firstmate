@@ -450,7 +450,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_codex_catalog "$fakebin"
+  fm_fake_harnesses "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

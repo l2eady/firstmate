@@ -102,6 +102,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_fake_harnesses "$fakebin"
   chmod +x "$fakebin/tmux"
   chmod +x "$fakebin/treehouse"
   : > "$dir/tmux.log"

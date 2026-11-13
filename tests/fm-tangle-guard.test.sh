@@ -179,6 +179,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_fake_harnesses "$fakebin"
   chmod +x "$fakebin/tmux"
   # Invalid candidates now stay in the bounded poll instead of aborting on the
   # first transient path, so shadow sleep to keep timeout cases deterministic.
@@ -266,6 +267,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_fake_harnesses "$fakebin"
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse sleep
   printf '%s\n' "$fakebin"
@@ -412,6 +414,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_fake_harnesses "$fakebin"
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
@@ -486,6 +489,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_fake_harnesses "$fakebin"
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse sleep
   printf '%s\n' "$fakebin"
