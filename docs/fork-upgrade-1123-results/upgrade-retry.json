@@ -1,0 +1,109 @@
+{
+  "families": [
+    {
+      "count": 1,
+      "duration_ms": 19683,
+      "failed": 1,
+      "name": "afk"
+    },
+    {
+      "count": 1,
+      "duration_ms": 291192,
+      "failed": 1,
+      "name": "backend-dispatch"
+    },
+    {
+      "count": 2,
+      "duration_ms": 263794,
+      "failed": 1,
+      "name": "pure-contract-unit"
+    },
+    {
+      "count": 1,
+      "duration_ms": 122351,
+      "failed": 1,
+      "name": "secondmate"
+    },
+    {
+      "count": 2,
+      "duration_ms": 98012,
+      "failed": 1,
+      "name": "watcher-wake-lock"
+    }
+  ],
+  "finished_at": "2026-11-23T15:42:22Z",
+  "run_id": "fm-test-run-1795447747158-92106",
+  "scripts": [
+    {
+      "duration_ms": 19528,
+      "exit": 1,
+      "expected_gate_skip": "none",
+      "family": "pure-contract-unit",
+      "gate_skip": false,
+      "gate_skip_reason": "",
+      "path": "tests/fm-calm-pi-extension.test.sh"
+    },
+    {
+      "duration_ms": 291192,
+      "exit": 1,
+      "expected_gate_skip": "none",
+      "family": "backend-dispatch",
+      "gate_skip": false,
+      "gate_skip_reason": "",
+      "path": "tests/fm-control-relaunch.test.sh"
+    },
+    {
+      "duration_ms": 96699,
+      "exit": 0,
+      "expected_gate_skip": "none",
+      "family": "watcher-wake-lock",
+      "gate_skip": false,
+      "gate_skip_reason": "",
+      "path": "tests/fm-pi-watch-extension.test.sh"
+    },
+    {
+      "duration_ms": 122351,
+      "exit": 1,
+      "expected_gate_skip": "none",
+      "family": "secondmate",
+      "gate_skip": false,
+      "gate_skip_reason": "",
+      "path": "tests/fm-remote-job.test.sh"
+    },
+    {
+      "duration_ms": 19683,
+      "exit": 1,
+      "expected_gate_skip": "none",
+      "family": "afk",
+      "gate_skip": false,
+      "gate_skip_reason": "",
+      "path": "tests/fm-supervision-host.test.sh"
+    },
+    {
+      "duration_ms": 244266,
+      "exit": 0,
+      "expected_gate_skip": "none",
+      "family": "pure-contract-unit",
+      "gate_skip": false,
+      "gate_skip_reason": "",
+      "path": "tests/fm-test-run.test.sh"
+    },
+    {
+      "duration_ms": 1313,
+      "exit": 1,
+      "expected_gate_skip": "none",
+      "family": "watcher-wake-lock",
+      "gate_skip": false,
+      "gate_skip_reason": "",
+      "path": "tests/fm-watch-wedge-cap-unconfigured-parity.test.sh"
+    }
+  ],
+  "selection": "scripts;jobs=1",
+  "started_at": "2026-11-23T15:29:07Z",
+  "summary": {
+    "duration_ms": 795352,
+    "failed": 5,
+    "skipped_gate": 0,
+    "total": 7
+  }
+}

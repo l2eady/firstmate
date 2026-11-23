@@ -1,0 +1,22 @@
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+
+In tests/fm-daemon.test.sh line 1592:
+        escalate_add() { return 1; }
+        ^--------------------------^ SC2329 (info): This function is never invoked. Check usage (or ignored if invoked indirectly).
+
+
+In tests/fm-daemon.test.sh line 1598:
+        fm_wake_status_append_self_announced() { return 2; }
+        ^-- SC2329 (info): This function is never invoked. Check usage (or ignored if invoked indirectly).
+
+
+In tests/fm-daemon.test.sh line 1617:
+      ) || fail "pending resume reconciliation failed ($event/$route)"
+                                                              ^----^ SC2031 (info): route was modified in a subshell. That change might be lost.
+
+For more information:
+  https://www.shellcheck.net/wiki/SC2031 -- route was modified in a subshell....
+  https://www.shellcheck.net/wiki/SC2329 -- This function is never invoked. C...
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid

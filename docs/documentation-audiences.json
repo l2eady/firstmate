@@ -414,6 +414,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/fork-upgrade-1123.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/forgejo-tea-integration.md",
       "audience": "maintainer-verification"
     },
@@ -535,6 +539,10 @@
     },
     {
       "path": "docs/t3code-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/teardown-resource-cleanup.md",
       "audience": "operator-current"
     },
     {

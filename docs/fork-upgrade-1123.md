@@ -140,37 +140,119 @@ Keep workspace cleanup scoped to the exact task and never stop the default Herdr
 
 ## Validation
 
-Runs on 2026-11-23 used isolated Git copies on arm64 macOS 26.5.2 with Bash 5.3.9, Apple Git 2.50.1, jq 1.8.1, and the pinned lint tools.
-Actionlint 1.7.12 was installed only in the task's validation directory.
-The local runner used isolated Git configuration and omitted the real Herdr and HC families from the broad comparison.
-The Herdr task's named-lab contract takes precedence over upstream's tests that create and operate their own sessions.
+The November 23 runs used separate disposable Git copies of pristine upstream `427056c4181c41074ad24f051f79919330df0fa5` and the upgrade code at `99963c4d1e3cdc8f43eccf9571c2399ef6bc5e81`.
+Both copies used arm64 macOS 26.5.2, system Bash 3.2.57, Apple Git 2.50.1, system jq 1.7.1-apple, ShellCheck 0.11.0, and actionlint 1.7.12.
+The validation environment used a temporary home and local Git fixture refs at the upstream commit.
+Actionlint was installed inside the disposable checkout.
+The complete lint and test runs ran serially with one worker and no test-script deadline.
 
-| Command or scenario | Pristine `427056c4` | Upgrade |
+```bash
+CI=true FM_LINT_JOBS=1 bin/fm-lint.sh --jobs 1 --telemetry lint.tsv
+FM_LIVE=0 env -u TMPDIR bin/fm-test-run.sh --all --jobs 1 --per-script-timeout-secs 0 --json tests.json
+```
+
+The test command scheduled every upstream family.
+The two runs used the same capability gates, including 65 skips for `FM_LIVE=0` and 13 because the Herdr CLI was unavailable in the automated runner.
+Herdr was left off the automated runner's PATH because upstream's real-Herdr suites can create and stop sessions outside the named lab contract.
+A separate smoke test in the authorized named lab used Herdr 0.8.0 / protocol 19 and verified exact pane close, the ensuing structured `pane_not_found` result, guarded teardown, and the unchanged default session.
+
+| Run | Pristine upstream | Upgrade |
 | --- | --- | --- |
-| `bin/fm-test-run.sh --check-coverage` | Passed: 340 scripts, 297 portable serial, 16 real Herdr. | Passed: 341 scripts, 298 portable serial, 16 real Herdr. The largest modeled serial shard is 1,198,710 ms within the 1,200,000 ms budget. |
-| `bin/fm-test-run.sh --jobs 1 tests/fm-project-mode.test.sh tests/fm-dod-lib.test.sh` | Both suites passed. | Both suites passed. The new cases resolved the two registry lines and required a full commit ID on origin's advertised default. |
-| Direct-push brief and spawn cases in `fm-brief.test.sh` and `fm-spawn-dispatch-profile.test.sh` | The new assertions failed before implementation. | The direct-push brief rendered and the fake-pane spawn recorded `mode=direct-push` and `yolo=on`. |
-| `tests/fm-resource.test.sh` | New fork coverage. | All 11 scenarios passed, including exact Docker labels, anonymous-volume removal, browser ownership, symlink refusal, a scoped dead-endpoint sweep, and the bootstrap project hook. |
-| Targeted cases from `tests/fm-teardown.test.sh` | Existing missing-adapter preflight behavior. | Passed the default-branch proof and project hook cases plus the existing missing-adapter preflight case. |
-| `bin/fm-lint.sh --fast bin/fm-spawn.sh bin/fm-teardown.sh` | Passed. | Passed in the targeted source-aware run, which also included the resource library and collector. |
-| Coverage runner regression cases | Existing suite defines the partition and budget boundary. | Passed shard union and disjointness, unmeasured-share bounds, and exact budget acceptance with rejection one millisecond above it. |
-| Workflow lint and stock Bash syntax | Existing workflows unchanged. | `bin/fm-lint-workflows.sh` validated all three files. Stock Bash parsed every changed shell file. |
-| Guarded Herdr lab | Runtime probe on the same installed binary. | Herdr 0.8.0 / protocol 19, exact pane close followed by structured `pane_not_found`, guarded teardown, and the default-session tripwire all passed. |
+| Full lint | 607 roots, one failing root, exit 1. [Root results](fork-upgrade-1123-results/pristine-lint.roots.tsv) · [Tool output](fork-upgrade-1123-results/pristine-lint.out) · [Telemetry](fork-upgrade-1123-results/pristine-lint.tsv) | 614 roots, one failing root, exit 1. [Root results](fork-upgrade-1123-results/upgrade-lint.roots.tsv) · [Tool output](fork-upgrade-1123-results/upgrade-lint.out) · [Telemetry](fork-upgrade-1123-results/upgrade-lint.tsv) |
+| Full tests | 340 scripts, 217 passes, 36 failures, 87 capability skips, exit 1. [Result file](fork-upgrade-1123-results/pristine-tests.json) | 341 scripts, 219 passes, 35 failures, 87 capability skips, exit 1. [Result file](fork-upgrade-1123-results/upgrade-tests.json) |
 
-The broad local command on each revision was `bin/fm-test-run.sh --all --exclude-family real-herdr-gated --exclude-family hc --per-script-timeout-secs 600 --json <timing-file>`.
-Both broad runs and both unpartitioned `CI=true bin/fm-lint.sh` runs were started.
-The broad runs did not provide complete comparable verdicts, and the full extended lint runs did not supply a final verdict.
-The focused verification and named lab do not constitute a complete upstream CI run.
+### Lint differences
 
-The local comparisons exposed these baseline issues.
+Both final runs reported `SC2329` at `tests/fm-daemon.test.sh:1592` and `:1598` and `SC2031` at `:1617`, with byte-identical diagnostic output.
+Actionlint validated all three workflows in both runs.
+Seven new roots passed on the upgrade: `bin/fm-disk-lib.sh`, `bin/fm-resource-chrome.sh`, `bin/fm-resource-docker.sh`, `bin/fm-resource-gc.sh`, `bin/fm-resource-lib.sh`, `bin/fm-test-db-sweep-lib.sh`, and `tests/fm-resource.test.sh`.
+The first full upgrade lint found `SC2329` on the local Docker wrapper because the cleanup helpers call it indirectly.
+Commit `99963c4d` documents that call and suppresses the finding for that function.
+The complete corrected run matched upstream on every shared root.
 
-- `fm-afk-inject-e2e.test.sh` misclassified the injection digest on both revisions.
-- `fm-afk-return.test.sh` failed the catch-up retention assertion after evidence publication failed on both revisions.
-- `fm-brief.test.sh` and `fm-task-delivery.test.sh` failed their existing metacharacter branch-prefix fixtures on both revisions.
-- `fm-spawn-dispatch-profile.test.sh` reached the same 600-second local bound on both revisions. The added direct-push case passed in its focused run.
-- The pristine broad run reached an existing T3 Code policy-table assertion failure. The candidate broad run had yet to reach that test.
-- The initial isolated clone omitted `origin/main`, which the existing backend baseline test requires. That fixture ref was subsequently populated from pristine upstream in both validation clones.
+### Test differences and shared failures
 
-The coverage command classifies one on-disk inventory and packs it once for comparison, avoiding partial reads observed on the local host.
-Its additional resource suite uses a 33-second packing hint from the observed local runs.
-Raw logs were kept under `data/upgrade-validation/` inside the disposable build checkout.
+The two full runs recorded 87 identical capability skips and no runner timeouts.
+The earlier 600-second cutoff had interrupted long suites.
+With the cutoff removed, both revisions passed the spawn-dispatch and remote secondmate lifecycle suites.
+The first full verdicts differed in exactly four scripts.
+
+| Script | Pristine upstream | Upgrade | Difference |
+| --- | --- | --- | --- |
+| `fm-documentation-audiences.test.sh` | Pass | Fail | The two new guides were missing from the upstream audience inventory. The final documentation registers both. See the final documentation check below. |
+| `fm-pi-watch-extension.test.sh` | Fail | Pass | The first upstream run reported that actionable output did not wait for the predecessor to close. See the serial retry below. |
+| `fm-resource.test.sh` | Absent | Pass | Adds 11 task-ownership and cleanup scenarios. |
+| `fm-test-run.test.sh` | Fail | Pass | Pristine upstream rejected a modeled shard exactly at the packing budget. The upgrade packs a single complete inventory before applying the budget. See the serial retry below. |
+
+All other per-script outcomes, family classifications, and skip reasons match.
+The process-lock control-byte assertion in `fm-session-lock-ps-denied.test.sh` emitted different fixture PIDs and temporary paths for the same escaping mismatch.
+Wall-clock timings are recorded in the result files.
+
+These 34 scripts failed on both full runs with the same assertions.
+
+| Script | First failure |
+| --- | --- |
+| `fm-afk-inject-e2e.test.sh` | The fake away-supervisor injection digest was misclassified. |
+| `fm-afk-return.test.sh` | Failed evidence publication did not retain catch-up state. |
+| `fm-backend-t3code.test.sh` | The refusal did not name the shell environment policy table. |
+| `fm-bootstrap.test.sh` | Watcher hygiene probe returned 127. |
+| `fm-calm-pi-extension.test.sh` | The simulated hung Chrome did not exhaust the expected retries. |
+| `fm-composer-lib.test.sh` | The fake Herdr multiword Claude model returned `unknown` for an empty composer. |
+| `fm-control-relaunch.test.sh` | Fake Herdr Pi relaunch did not complete registration. |
+| `fm-control.test.sh` | The Hermes diagnostic omitted the gateway. |
+| `fm-cortex-harness.test.sh` | The dialog fixture failed to exercise the identity gate. |
+| `fm-cursor-harness.test.sh` | The harness detector missed a Cursor ancestor. |
+| `fm-gotmp.test.sh` | Teardown returned nonzero with a valid task temp directory. |
+| `fm-guard-stale-banner.test.sh` | A live tagged extension handoff printed a stale banner. |
+| `fm-harness-precedence.test.sh` | Codex process ancestry failed to resolve the harness. |
+| `fm-herdr-groups.test.sh` | The fake socket path used `/private/tmp` in place of `/tmp`. |
+| `fm-hermes-harness.test.sh` | The NUL-argument fallback missed the harness identity. |
+| `fm-kimi-harness.test.sh` | Hook installation refused the realistic config fixture. |
+| `fm-live-lab-up-mate.test.sh` | The launch result omitted the mate readiness check. |
+| `fm-live-lab.test.sh` | The mock primary window was reported stopped. |
+| `fm-muse-harness.test.sh` | The process-name probe missed the Muse harness. |
+| `fm-pr-merge.test.sh` | A well-formed Forgejo pull request URL failed the merge fixture. |
+| `fm-public-followup.test.sh` | Outcome text reached 1,200 characters without truncation. |
+| `fm-record-export-remote-home.test.sh` | The host had no `timeout` executable. |
+| `fm-record-export.test.sh` | Archive retry accepted a committed manifest with an extra entry. |
+| `fm-remote-job.test.sh` | An idle worker polled seven times in four seconds. |
+| `fm-session-lock-ps-denied.test.sh` | The process providers disagreed on escaping tabs and newlines. |
+| `fm-session-lock-windows-consumers.test.sh` | Watcher auto-arm failed to claim a Windows lock fixture. |
+| `fm-spawn-orca-worktree.test.sh` | Failed deletion did not preserve the interactive `/bin/zsh` pane as expected. |
+| `fm-startup-growth-check.test.sh` | The leading unsafe-memory finding was missing. |
+| `fm-stow-guard.test.sh` | The fixture PATH still exposed `jq`. |
+| `fm-supervision-host-park.test.sh` | A warm compact operated on a conversation that the next turn would not resume. |
+| `fm-supervision-host.test.sh` | The stopped-host wake-queue check could not run because the host lacked the `timeout` executable. |
+| `fm-voice-relay.test.sh` | The credential reuse assertion failed. |
+| `fm-watch-arm.test.sh` | The restored row differed from the inherited row. |
+| `fm-watch-wedge-cap-unconfigured-parity.test.sh` | System Bash 3.2 rejected the fixture's empty `cap_args` array before the busy-rung watcher could start. |
+
+### Serial reruns
+
+Seven scripts ran again on each revision, serially and without a runner cutoff. [Pristine results](fork-upgrade-1123-results/pristine-retry.json) · [Upgrade results](fork-upgrade-1123-results/upgrade-retry.json)
+
+| Script | Pristine upstream rerun | Upgrade rerun |
+| --- | --- | --- |
+| `fm-calm-pi-extension.test.sh` | Same failure | Same failure |
+| `fm-control-relaunch.test.sh` | Same failure | Same failure |
+| `fm-pi-watch-extension.test.sh` | Passed | Passed |
+| `fm-remote-job.test.sh` | Same failure | Same failure |
+| `fm-supervision-host.test.sh` | Same missing `timeout` executable | Same missing `timeout` executable |
+| `fm-test-run.test.sh` | Same exact-budget failure | Passed |
+| `fm-watch-wedge-cap-unconfigured-parity.test.sh` | Same empty-array failure under system Bash | Same empty-array failure under system Bash |
+
+The Pi watcher difference did not reproduce.
+The runner packing difference reproduced on both attempts and the upgrade accepted the exact budget.
+A worktree-local PATH entry used the already installed Bash 5.3.9 to rerun the watcher parity and simulated Chrome cases on both revisions.
+Watcher parity passed on both.
+The simulated Chrome case first failed on pristine upstream and passed on the upgrade, then passed on both in the next serial retry. [Pristine Bash 5.3 results](fork-upgrade-1123-results/pristine-bash53.json) · [Upgrade Bash 5.3 results](fork-upgrade-1123-results/upgrade-bash53.json) · [Pristine Chrome retry](fork-upgrade-1123-results/pristine-calm-retry.json) · [Upgrade Chrome retry](fork-upgrade-1123-results/upgrade-calm-retry.json)
+
+The final delivery adds the documentation inventory correction and the result files to the tested upgrade commit.
+The documentation audience and link check passed on those final files. [Final documentation result](fork-upgrade-1123-results/upgrade-final-docs.json)
+
+### Focused upgrade checks
+
+The direct-push tests verify both registry examples, the no-PR brief, `direct-push` and `yolo` spawn metadata, and teardown proof against the remote's advertised default branch.
+The resource test exercises exact Docker labels, anonymous volumes, browser ownership, symlink refusal, dead-endpoint sweep, and the bootstrap project hook.
+The coverage audit counted 340 scripts on upstream and 341 on the upgrade, with 297 and 298 portable serial scripts respectively and 16 real-Herdr scripts on each revision.
+The upgrade's largest modeled serial shard is 1,198,710 ms against the 1,200,000 ms budget.

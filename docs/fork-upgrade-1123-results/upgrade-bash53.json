@@ -1,0 +1,46 @@
+{
+  "families": [
+    {
+      "count": 1,
+      "duration_ms": 15557,
+      "failed": 0,
+      "name": "pure-contract-unit"
+    },
+    {
+      "count": 1,
+      "duration_ms": 54292,
+      "failed": 0,
+      "name": "watcher-wake-lock"
+    }
+  ],
+  "finished_at": "2026-11-23T15:45:16Z",
+  "run_id": "fm-test-run-1795448646578-12882",
+  "scripts": [
+    {
+      "duration_ms": 15557,
+      "exit": 0,
+      "expected_gate_skip": "none",
+      "family": "pure-contract-unit",
+      "gate_skip": false,
+      "gate_skip_reason": "",
+      "path": "tests/fm-calm-pi-extension.test.sh"
+    },
+    {
+      "duration_ms": 54292,
+      "exit": 0,
+      "expected_gate_skip": "none",
+      "family": "watcher-wake-lock",
+      "gate_skip": false,
+      "gate_skip_reason": "",
+      "path": "tests/fm-watch-wedge-cap-unconfigured-parity.test.sh"
+    }
+  ],
+  "selection": "scripts;jobs=1",
+  "started_at": "2026-11-23T15:44:06Z",
+  "summary": {
+    "duration_ms": 69947,
+    "failed": 0,
+    "skipped_gate": 0,
+    "total": 2
+  }
+}
