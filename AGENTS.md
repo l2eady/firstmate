@@ -235,7 +235,7 @@ The path's worker, automated gates, and captain approval remain authoritative:
 
 - **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
 - **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
-- **direct-push** has the worker land a tested fast-forward on origin’s default branch; follow `ship-landing` on its push receipt.
+- **direct-push** has the worker land a tested fast-forward on origin’s default branch and report it through the `ship-landing` procedure.
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
 Delivery mode and `yolo` are orthogonal.

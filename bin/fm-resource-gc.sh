@@ -19,6 +19,8 @@ esac
 [ "$#" -le 1 ] || exit 2
 [ -d "$STATE" ] || exit 0
 
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-resource-lib.sh
 . "$SCRIPT_DIR/fm-resource-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh

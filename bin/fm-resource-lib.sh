@@ -8,11 +8,6 @@ _FM_RESOURCE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-backend-hometag-lib.sh
 . "$_FM_RESOURCE_LIB_DIR/fm-backend-hometag-lib.sh"
 
-if ! declare -F fm_backend_of_meta >/dev/null 2>&1; then
-  # shellcheck source=bin/fm-backend.sh
-  . "$_FM_RESOURCE_LIB_DIR/fm-backend.sh"
-fi
-
 FM_RESOURCE_OWNER_LABEL="com.firstmate.owner"
 FM_RESOURCE_TASK_LABEL="com.firstmate.task"
 FM_RESOURCE_HOME_LABEL="com.firstmate.home"
@@ -28,13 +23,8 @@ fm_resource_valid_task_id() {
   esac
 }
 
-fm_resource_home_tag_for() {  # <home> <root>
-  local home=$1
-  (
-    FM_HOME=$home
-    FM_ROOT=$home
-    fm_backend_hometag
-  )
+fm_resource_home_tag_for() {  # <home>
+  FM_HOME=$1 FM_ROOT=$1 fm_backend_hometag
 }
 
 fm_resource_owner_for() {  # <home> <root> <task-id>
