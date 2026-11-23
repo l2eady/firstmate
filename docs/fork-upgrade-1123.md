@@ -153,6 +153,7 @@ The Herdr task's named-lab contract takes precedence over upstream's tests that 
 | `tests/fm-resource.test.sh` | New fork coverage. | All 11 scenarios passed, including exact Docker labels, anonymous-volume removal, browser ownership, symlink refusal, a scoped dead-endpoint sweep, and the bootstrap project hook. |
 | Targeted cases from `tests/fm-teardown.test.sh` | Existing missing-adapter preflight behavior. | Passed the default-branch proof and project hook cases plus the existing missing-adapter preflight case. |
 | `bin/fm-lint.sh --fast bin/fm-spawn.sh bin/fm-teardown.sh` | Passed. | Passed in the targeted source-aware run, which also included the resource library and collector. |
+| Coverage runner regression cases | Existing suite defines the partition and budget boundary. | Passed shard union and disjointness, unmeasured-share bounds, and exact budget acceptance with rejection one millisecond above it. |
 | Workflow lint and stock Bash syntax | Existing workflows unchanged. | `bin/fm-lint-workflows.sh` validated all three files. Stock Bash parsed every changed shell file. |
 | Guarded Herdr lab | Runtime probe on the same installed binary. | Herdr 0.8.0 / protocol 19, exact pane close followed by structured `pane_not_found`, guarded teardown, and the default-session tripwire all passed. |
 
@@ -170,6 +171,6 @@ The local comparisons exposed these baseline issues.
 - The pristine broad run reached an existing T3 Code policy-table assertion failure. The candidate broad run had yet to reach that test.
 - The initial isolated clone omitted `origin/main`, which the existing backend baseline test requires. That fixture ref was subsequently populated from pristine upstream in both validation clones.
 
-The coverage command reads one portable inventory and packs it once for comparison, avoiding a partial shard read on the local host.
+The coverage command classifies one on-disk inventory and packs it once for comparison, avoiding partial reads observed on the local host.
 Its additional resource suite uses a 33-second packing hint from the observed local runs.
 Raw logs were kept under `data/upgrade-validation/` inside the disposable build checkout.

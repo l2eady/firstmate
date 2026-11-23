@@ -704,21 +704,23 @@ is_proven_isolated_script() {
 # secondmate lifecycle, bootstrap, the live-harness-optin family, GUI-backend,
 # and other unproven work stays here. Derived rather than enumerated so a newly added test
 # lands here by default instead of falling out of every lane.
-list_portable_serial() {
-  local s base fam
+list_portable_serial() (  # [<all-test-inventory>]
+  local inventory=${1:-} scratch s fam proven
+  if [ -z "$inventory" ]; then
+    scratch=$(mktemp "${TMPDIR:-/tmp}/fm-test-inventory.XXXXXX") || return 1
+    trap 'rm -f -- "$scratch"' EXIT
+    all_repo_tests >"$scratch"
+    inventory=$scratch
+  fi
+  proven=$'\n'$(list_proven_isolated)$'\n'
   while IFS= read -r s; do
     [ -n "$s" ] || continue
-    base=$(basename "$s")
-    fam=$(family_for_basename "$base")
-    if [ "$fam" = "real-herdr-gated" ]; then
-      continue
-    fi
-    if is_proven_isolated_script "$s"; then
-      continue
-    fi
+    case "$proven" in *$'\n'"$s"$'\n'*) continue ;; esac
+    fam=$(family_for_basename "${s##*/}")
+    [ "$fam" != real-herdr-gated ] || continue
     printf '%s\n' "$s"
-  done < <(all_repo_tests)
-}
+  done < "$inventory"
+)
 
 # Measured portable-serial script durations in milliseconds, from the CI timing
 # artifacts recorded in docs/fm-test-portable-shards.md. Each value is the
@@ -1042,7 +1044,7 @@ portable_serial_assignments() (  # [<serial-inventory>]
   fi
   portable_serial_weight_hints >"$tmp/hints"
   LC_ALL=C awk -v fallback="$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS" '
-    NR == FNR { hint[$1] = $2; next }
+    FILENAME == ARGV[1] { hint[$1] = $2; next }
     NF { printf "%s\t%s\n", (($1 in hint) ? hint[$1] : fallback), $1 }
   ' "$tmp/hints" "$inventory" >"$tmp/weights"
   LC_ALL=C sort -t$'\t' -k1,1nr -k2,2 "$tmp/weights" >"$tmp/sorted"
@@ -1188,10 +1190,8 @@ run_coverage_guard() {
   # Serial (whole lane and each CI shard) + Herdr lane listings without
   # disturbing a caller's selection.
   saved_scripts=("${SCRIPTS[@]+"${SCRIPTS[@]}"}")
-  SCRIPTS=()
-  select_lane portable-serial
-  printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/serial"
-  # Use one inventory snapshot for all shards of this coverage check.
+  # Derive the serial lane and its shards from the same on-disk inventory.
+  list_portable_serial "$tmp/all" >"$tmp/serial"
   portable_serial_assignments "$tmp/serial" >"$tmp/serial_assignments"
   : >"$tmp/serial_shards_raw"
   shard=1
@@ -2176,7 +2176,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --proven-isolated)
       [ -z "$MODE" ] || die "only one selection mode is allowed"
-      MODE=proven-isolated
+      MODE='proven-isolated'
       shift
       ;;
     --changed)
