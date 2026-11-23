@@ -1779,6 +1779,10 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
+    bin/fm-resource-*.sh|bin/fm-test-db-sweep-lib.sh)
+      printf '%s\n' "__script__:fm-resource.test.sh"
+      printf '%s\n' "__script__:fm-teardown.test.sh"
+      ;;
     bin/fm-teardown.sh)
       printf '%s\n' pr-forge
       printf '%s\n' "__script__:fm-backend-t3code.test.sh"

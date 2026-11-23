@@ -465,6 +465,20 @@ test_gc_requires_dead_owner() {
   pass "orphan GC removes only resources whose owner is proven dead"
 }
 
+test_usage_record_refuses_symlink() {
+  local home tasktmp manifest
+  home=$(new_home usage-symlink)
+  tasktmp="$TMP_ROOT/fm-resource-usage"
+  manifest=$(prepare_task "$home" resource-usage "$tasktmp")
+  printf 'preserve me\n' > "$home/unrelated"
+  ln -s "$home/unrelated" "$manifest.docker-used"
+  if ( eval "$(fm_resource_task_env_line "$manifest")"; docker run postgres ) >/dev/null 2>&1; then
+    fail "resource wrapper accepted a symlink for its usage record"
+  fi
+  [ "$(cat "$home/unrelated")" = "preserve me" ] || fail "wrapper truncated a file outside its usage record"
+  pass "Docker usage recording refuses symlinks"
+}
+
 test_bootstrap_sweeps_only_eligible_project_hooks() {
   local home projects hook out
   home=$(new_home db-bootstrap)
@@ -525,3 +539,4 @@ test_gc_kills_dead_endpoint_before_resources
 
 test_chrome_external_attachment_is_preserved
 test_bootstrap_sweeps_only_eligible_project_hooks
+test_usage_record_refuses_symlink

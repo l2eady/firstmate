@@ -701,6 +701,31 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+test_teardown_runs_owned_project_database_hook() {
+  local case_dir hook
+  case_dir=$(make_case project-db-sweep)
+  write_meta "$case_dir" no-mistakes ship
+  hook="$case_dir/wt/scripts/e2e_db_cleanup.sh"
+  mkdir -p "${hook%/*}"
+  cat > "$hook" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "$PWD" "$*" > "$FM_DB_SWEEP_LOG"
+printf 'removed fixture-orphan\n'
+SH
+  chmod +x "$hook"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$case_dir/fakebin/docker"
+  chmod +x "$case_dir/fakebin/docker"
+  git -C "$case_dir/wt" add -- scripts/e2e_db_cleanup.sh
+  git -C "$case_dir/wt" -c user.name=test -c user.email=t@t commit -qm 'add project hook'
+  git -C "$case_dir/wt" push -q origin HEAD:refs/heads/fm/task-x1
+  FM_DB_SWEEP_LOG="$case_dir/db.log" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "teardown refused the landed fixture: $(cat "$case_dir/stderr")"
+  [ "$(cat "$case_dir/db.log")" = "$(cd "$case_dir" && pwd -P)/wt --orphans" ] \
+    || fail "teardown did not run the orphan-only hook in the owned copy"
+  assert_grep "TESTDB_SWEEP: wt collected 1 orphan(s)" "$case_dir/stdout" "teardown omitted successful database cleanup"
+  pass "ordinary teardown calls the project's orphan-only database hook before returning the copy"
+}
+
 test_direct_push_requires_origin_default() {
   local case_dir
   case_dir=$(make_case direct-push-origin-default)
@@ -6613,6 +6638,7 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_direct_push_requires_origin_default
+test_teardown_runs_owned_project_database_hook
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note

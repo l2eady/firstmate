@@ -253,7 +253,7 @@ Load `validation-supervision` when a ship starts or already has an active no-mis
 
 ### PR ready, landing, and teardown
 
-Load `ship-landing` when a ship reports a PR or ready branch, when deciding or monitoring landing, and before task cleanup.
+Load `ship-landing` when a ship reports a PR, direct push, or ready branch, when deciding or monitoring landing, and before task cleanup.
 
 ### Scout outcome and promotion
 

@@ -405,6 +405,8 @@ for _teardown_source in \
   fm-cursor-lib.sh \
   fm-nm-run-lib.sh \
   fm-dod-lib.sh \
+  fm-resource-lib.sh \
+  fm-test-db-sweep-lib.sh \
   fm-wake-lib.sh \
   fm-path-lib.sh \
   fm-lease-lib.sh

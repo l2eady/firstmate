@@ -78,7 +78,7 @@ if [ "$uses_browser" = 1 ]; then
     echo "error: firstmate Chrome wrapper has no durable resource manifest" >&2
     exit 1
   }
-  : > "$manifest.chrome-used" 2>/dev/null || {
+  fm_resource_mark_usage "$manifest" chrome-used 2>/dev/null || {
     echo "error: cannot record Chrome use in $manifest" >&2
     exit 1
   }

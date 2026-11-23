@@ -70,6 +70,16 @@ fm_resource_manifest_get() {  # <manifest> <key>
   grep "^$key=" "$manifest" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+fm_resource_mark_usage() {  # <manifest> <suffix>
+  local path="$1.$2"
+  [ ! -L "$path" ] || return 1
+  if [ -e "$path" ]; then
+    [ -f "$path" ]
+  else
+    (umask 077; set -C; : > "$path") || { [ -f "$path" ] && [ ! -L "$path" ]; }
+  fi
+}
+
 fm_resource_marker_get() {  # <marker> <key>
   fm_resource_manifest_get "$1" "$2"
 }
@@ -564,6 +574,10 @@ _fm_resource_docker_cleanup_kinds() {  # <owner> <task> <compose> <require> <hom
     while IFS= read -r cid; do
       [ -n "$cid" ] || continue
       case "$cid" in
+        -*)
+          echo "REFUSED: Docker returned an option-like $kind id for $owner: $cid" >&2
+          return 1
+          ;;
         ''|*[!A-Za-z0-9_.-]*)
           echo "REFUSED: Docker returned an unsafe $kind id for $owner: $cid" >&2
           return 1

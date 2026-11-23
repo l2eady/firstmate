@@ -96,12 +96,12 @@ mark_used() {
     echo "error: firstmate Docker wrapper has no durable resource manifest" >&2
     return 1
   }
-  : > "$manifest.docker-used" 2>/dev/null || {
+  fm_resource_mark_usage "$manifest" docker-used 2>/dev/null || {
     echo "error: cannot record Docker use in $manifest" >&2
     return 1
   }
   if [ "$resource_kind" = service ]; then
-    : > "$manifest.docker-service-used" 2>/dev/null || {
+    fm_resource_mark_usage "$manifest" docker-service-used 2>/dev/null || {
       echo "error: cannot record Docker service use in $manifest" >&2
       return 1
     }
