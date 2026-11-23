@@ -787,4 +787,3 @@ fm_resource_cleanup_task() {  # <id> <home> <root> <state> <tasktmp> [<manifest>
   fm_resource_remove_task_tmp "$id" "$tasktmp" "$owner" "$resource_home" "$resource_root" "$home_tag" || return 1
   rm -f "$manifest" "$manifest.docker-used" "$manifest.chrome-used" "$manifest.docker-service-used"
 }
-
