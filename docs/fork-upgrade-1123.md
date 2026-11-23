@@ -29,7 +29,7 @@ The task's `+yolo` value is still carried in metadata.
 
 ## Dropped or superseded
 
-- `28be0853` and the earlier AFK and agent-death series use older supervision paths. Upstream already has exact endpoint and agent-state probes in [watch](../bin/fm-watch.sh) and ledger reconciliation in [inactive reconcile](../bin/fm-inactive-reconcile.sh).
+- `28be0853` and the earlier AFK and agent-death series use older supervision paths. Upstream already has exact endpoint and agent-state probes in [watch](../bin/fm-watch.sh) (`wedge_dead_record` and `fm-crew-state.sh --reconcile`) and ledger reconciliation in [inactive reconcile](../bin/fm-inactive-reconcile.sh).
 - `de84aa7d` addressed the fork's older Herdr test cleanup traps. Upstream's [lab helper](../bin/fm-herdr-lab.sh) and real-Herdr lane already own guarded teardown and tripwire handling.
 - `ce415099` supplied fakes for the older tests. The upgraded suites already have per-harness fixture logic and a live gate in [tests/lib.sh](../tests/lib.sh).
 - `43c7863e` documented the three November fixes. The Docker resolver and disk warning documentation follow the upgraded entry points above. The older supervision wording follows the upstream paths.
@@ -39,6 +39,7 @@ The task's `+yolo` value is still carried in metadata.
 - The no-CI part of `bda0a01d` is covered by upstream's [crew state](../bin/fm-crew-state.sh) `no-checks` result.
 - The tmux pause bookkeeping and empty pane fixes in `6ba5fb57` and `aa253a68` are outside the Herdr migration. Upstream has since changed the relevant task and endpoint inventory code.
 - Dynamic Codex `max` is skipped. Upstream retains its `gpt-5.6-luna` exception, and the live `gpt-6.2-sol high` dispatch stays supported. Re-introducing the fork behavior would need catalog probing and consistent fallback across Codex launch paths.
+- `f54ebec3`, `4393a334`, and `b748bb46` supplied guidance or notes for the older fork. The upgraded cleanup contract is documented separately, and upstream relaunch now keeps the existing worktree.
 - The optional child-workspace label change was exploratory. Upstream's existing presentation identity and task ID display remain the migration baseline.
 
 ## Tool floors
@@ -64,7 +65,7 @@ For the live cutover, use the presentation floor above.
 Run these steps on the live home only when the captain schedules the switch.
 Keep the home and project paths in place so the absolute references, existing Treehouse pools, and path-keyed harness state remain usable.
 
-1. Stop dispatching and finish every task under the currently running fork. At assessment three tasks were in flight. Recheck the inventory at cutover because it can change. Land or explicitly resolve each task, then run the old `bin/fm-teardown.sh <id>`. Exit AFK through the running home’s procedure and stop its supervisor and watcher. Verify no firstmate process holds the home lock and no task `state/*.meta` remains.
+1. Stop dispatching and finish every task under the currently running fork. At assessment three tasks were in flight. Recheck the inventory at cutover because it can change. Land or explicitly resolve each task, then run the old `bin/fm-teardown.sh <id>`. If the old home is away, send a genuine message so its `afk` skill can clear the posture and stop the daemon. End the old firstmate only after tasks and wake obligations are drained. If its watcher persists, check the PID in `state/.watch.lock/pid` against the process and the recorded home identity, then signal just that confirmed watcher. Verify the watcher is gone, the home lock has no live holder, and no `state/*.meta` remains.
 2. Run old `bin/fm-resource-gc.sh --dry-run`, then `bin/fm-resource-gc.sh`. Investigate each retained manifest or endpoint and confirm the task-labelled Docker resources are gone before switching. Let the owning project clean remaining test databases with its documented orphan-only command. Preserve unresolved metadata and use the old runtime to reconcile it.
 3. Bring the tools above to their supported floors before dispatching. Make the backup private and record which refs it represents.
 

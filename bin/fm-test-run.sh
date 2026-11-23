@@ -1032,8 +1032,20 @@ portable_serial_weight_for() {
 # PORTABLE_SERIAL_SHARDS bins, printing "<shard>\t<script>" for every script.
 # Deterministic: candidates are ordered by hint descending then path, and ties
 # between equally loaded bins always take the lowest bin index.
-portable_serial_assignments() {
-  local ms script i best best_load
+portable_serial_assignments() (  # [<serial-inventory>]
+  local inventory=${1:-} tmp ms script i best best_load
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-assign.XXXXXX") || return 1
+  trap 'rm -rf -- "$tmp"' EXIT
+  if [ -z "$inventory" ]; then
+    inventory="$tmp/inventory"
+    list_portable_serial >"$inventory"
+  fi
+  portable_serial_weight_hints >"$tmp/hints"
+  LC_ALL=C awk -v fallback="$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS" '
+    NR == FNR { hint[$1] = $2; next }
+    NF { printf "%s\t%s\n", (($1 in hint) ? hint[$1] : fallback), $1 }
+  ' "$tmp/hints" "$inventory" >"$tmp/weights"
+  LC_ALL=C sort -t$'\t' -k1,1nr -k2,2 "$tmp/weights" >"$tmp/sorted"
   local -a loads=()
   i=1
   while [ "$i" -le "$PORTABLE_SERIAL_SHARDS" ]; do
@@ -1054,13 +1066,8 @@ portable_serial_assignments() {
     done
     loads[best]=$((best_load + ms))
     printf '%s\t%s\n' "$best" "$script"
-  done < <(
-    while IFS= read -r script; do
-      [ -n "$script" ] || continue
-      printf '%s\t%s\n' "$(portable_serial_weight_for "$script")" "$script"
-    done < <(list_portable_serial) | LC_ALL=C sort -t$'\t' -k1,1nr -k2,2
-  )
-}
+  done < "$tmp/sorted"
+)
 
 # Parse "<k>of<n>" from a portable-serial shard lane and echo <k>, refusing when
 # <n> disagrees with this script's configured count so a CI matrix built for a
@@ -1132,7 +1139,7 @@ select_lane() {  # <lane> [<serial-assignment-snapshot>]
         fi
       done < <(
         if [ -n "$assignments" ]; then
-          cat "$assignments"
+          awk -v shard="$shard" '$1 == shard' "$assignments"
         else
           portable_serial_assignments
         fi
@@ -1185,7 +1192,7 @@ run_coverage_guard() {
   select_lane portable-serial
   printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/serial"
   # Use one inventory snapshot for all shards of this coverage check.
-  portable_serial_assignments >"$tmp/serial_assignments"
+  portable_serial_assignments "$tmp/serial" >"$tmp/serial_assignments"
   : >"$tmp/serial_shards_raw"
   shard=1
   while [ "$shard" -le "$PORTABLE_SERIAL_SHARDS" ]; do
