@@ -53,6 +53,15 @@ run_forge() {
 [ "$(run_forge legacy)" = "none" ] || fail "an entry with no forge token must report forge none: $(run_forge legacy)"
 [ "$(run_mode flagged)" = "direct-PR on" ] || fail "flagged entry's mode/yolo output changed: $(run_mode flagged)"
 [ "$(run_forge flagged)" = "none" ] || fail "mode and +yolo with no forge token must report forge none: $(run_forge flagged)"
+printf '%s\n' '- x [direct-push +yolo] - example' > "$DATA/projects.md.push"
+mv "$DATA/projects.md" "$DATA/projects.md.forge"
+mv "$DATA/projects.md.push" "$DATA/projects.md"
+[ "$(run_mode x)" = "direct-push on" ] || fail "direct-push +yolo did not resolve"
+printf '%s\n' '- x [direct-push] - example' > "$DATA/projects.md"
+[ "$(run_mode x)" = "direct-push off" ] || fail "direct-push without +yolo did not resolve"
+mv "$DATA/projects.md.forge" "$DATA/projects.md"
+pass "the worked direct-push registry lines preserve both yolo postures"
+
 pass "fm-project-mode: an entry with no forge token reports forge none and keeps its two-word default output"
 
 [ "$(run_mode lab)" = "no-mistakes off" ] || fail "lab entry's mode output changed: $(run_mode lab)"

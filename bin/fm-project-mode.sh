@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Resolve a project's REGISTERED delivery posture from the data/projects.md registry.
 # Default usage prints two words to stdout: "<mode> <yolo>" where mode is one of
-# no-mistakes|direct-PR|local-only and yolo is on|off.
+# no-mistakes|direct-PR|direct-push|local-only and yolo is on|off.
 # --branch-prefix instead prints one value: the project's registered ship-branch
 # prefix, "fm/" when the project registers none, is unregistered, or the registry
 # is absent, so every existing installation keeps its current "fm/<task-id>"
@@ -44,6 +44,7 @@
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
 #   direct-PR              push + PR via gh-axi, no pipeline
+#   direct-push  commit, rebase and fast-forward origin's default branch
 #   local-only             local branch, no remote/PR, guarded local merge
 #   no-mistakes-prod-only  a conditional policy, not a task mode: firstmate
 #                          classifies each task's surface at intake (the
@@ -247,7 +248,7 @@ EOF
 forge=${rest_forge:-none}
 pr=${rest_pr:-auto}
 case "$mode" in
-  no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
+  no-mistakes|direct-PR|direct-push|local-only|no-mistakes-prod-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off; branch=fm/ ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
@@ -265,6 +266,10 @@ case "$forge" in
     echo "refused: unknown forge \"${forge#forge=}\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=forgejo, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
     exit 3 ;;
 esac
+if [ "$forge" != none ] && [ "$mode" = direct-push ]; then
+  echo "refused: $NAME is registered direct-push with forge=$forge in $REG; direct-push uses origin's default branch without a review adapter" >&2
+  exit 3
+fi
 if [ "$forge" != none ] && [ "$mode" = local-only ]; then
   echo "refused: $NAME is registered local-only with forge=$forge in $REG; local-only publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; register no-mistakes or direct-PR to publish through the forge, or drop the forge token to keep the project local" >&2
   exit 3

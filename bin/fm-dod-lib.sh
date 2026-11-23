@@ -6,7 +6,7 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+# fm_dod_block <no-mistakes|direct-PR|direct-push|local-only> <task-id> [branch] [<forge>]
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
 # contract.
@@ -175,7 +175,7 @@ EOF
 # than a local branch carrying commits origin has never received.
 fm_mode_publishes() {  # <mode>
   case "$1" in
-    no-mistakes|direct-PR) return 0 ;;
+    no-mistakes|direct-PR|direct-push) return 0 ;;
   esac
   return 1
 }
@@ -196,6 +196,10 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
   esac
   if [ "$forge" != none ] && [ "$mode" = local-only ]; then
     echo "error: $caller: forge=$forge cannot ship mode=local-only - that mode publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; ship no-mistakes or direct-PR, which publish through the forge" >&2
+    return 1
+  fi
+  if [ "$forge" != none ] && [ "$mode" = direct-push ]; then
+    echo "error: $caller: direct-push uses origin's default branch without a review adapter" >&2
     return 1
   fi
   if [ "$forge" = external ] && [ "$mode" != direct-PR ]; then
@@ -259,6 +263,10 @@ fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
     echo "error: $caller: a base branch cannot ship mode=local-only, whose landing fast-forwards local main; ship no-mistakes or direct-PR, which open a pull request against the base" >&2
     return 1
   fi
+  if [ "$mode" = direct-push ]; then
+    echo "error: $caller: direct-push lands on origin's default branch; drop --base-branch" >&2
+    return 1
+  fi
   if [ "$forge" != none ]; then
     echo "error: $caller: a base branch is not supported on forge=$forge" >&2
     return 1
@@ -277,7 +285,7 @@ fm_brief_base_branches() {  # <brief>
   ' "$1"
 }
 
-fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>]
+fm_ship_rule_one() {  # <no-mistakes|direct-PR|direct-push|local-only> <task-id> [branch] [<forge>] [<base>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-}
   local branch=${3:-fm/$id} target='the default branch'
   fm_forge_valid_for_mode "$forge" "$mode" fm_ship_rule_one || return 1
@@ -302,6 +310,9 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
   case "$mode" in
     direct-PR)
       printf '%s\n' "1. Never push to $target (push only your \`$branch\` branch). Never merge a PR."
+      ;;
+    direct-push)
+      printf '%s\n' "1. Work on \`$branch\`. Push only a fast-forward to origin's default branch after the tests pass. Never force-push or open a pull request."
       ;;
     local-only)
       printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
@@ -658,6 +669,20 @@ If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the 
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
+    direct-push:*)
+      cat <<EOF
+# Definition of done
+Delivery contract: mode=direct-push$contract_consent
+Ship branch: $branch
+This task ships **direct-push** to origin's default branch.
+Commit on \`$branch\` and run the project's tests.
+Resolve the current default branch with \`git ls-remote --symref origin HEAD\`, fetch that branch, and rebase onto its fetched tip.
+Verify the rebased work, then push with \`git push origin HEAD:refs/heads/<branch>\`, substituting the resolved default branch.
+If origin advances and rejects the push, fetch, rebase, verify, and retry.
+Never force-push, open a pull request, or run /no-mistakes.
+After the push succeeds, append \`done [at=<epoch>]: pushed to {branch} as {sha}\` with the branch name and full \`git rev-parse HEAD\` output, then stop.
+EOF
+      ;;
     local-only:*)
       cat <<EOF
 # Definition of done
@@ -812,7 +837,7 @@ fm_dod_should_gate_ship_done() {  # <kind> <mode> <line>
   [ "$(status_line_verb "$3")" = "done" ] || return 1
   note=$(status_line_note "$3")
   case "$2" in
-    direct-PR|local-only) return 0 ;;
+    direct-PR|direct-push|local-only) return 0 ;;
     no-mistakes|'')
       fm_dod_note_reports_ci_ready "$note" || fm_dod_note_reports_published_change "$note" ;;
     *) return 1 ;;
@@ -1105,6 +1130,24 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   fm_dod_named_head_on_surviving_ref "$@"
 }
 
+# Print origin's advertised default branch if it carries <sha>. A fork, a
+# tracking ref left over from a deleted branch, or a detached remote HEAD does
+# not prove a direct push landed. Fetch objects only when the tip is unknown.
+fm_dod_direct_push_landed() {  # <repo> <sha>
+  local repo=$1 sha=$2 advertisement branch tip
+  [ -d "$repo" ] && fm_pr_head_valid "$sha" || return 1
+  advertisement=$(GIT_TERMINAL_PROMPT=0 fm_run_timed 5 git -C "$repo" ls-remote --symref origin HEAD </dev/null 2>/dev/null) || return 1
+  branch=$(printf '%s\n' "$advertisement" | awk '$1 == "ref:" && $3 == "HEAD" && $2 ~ /^refs\/heads\// {print substr($2,12)}')
+  tip=$(printf '%s\n' "$advertisement" | awk 'NF == 2 && $2 == "HEAD" {print $1}')
+  git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 && fm_pr_head_valid "$tip" || return 1
+  if ! git -C "$repo" cat-file -e "$tip^{commit}" 2>/dev/null; then
+    GIT_TERMINAL_PROMPT=0 fm_run_timed 5 git -C "$repo" fetch --quiet --no-write-fetch-head \
+      --no-tags --no-recurse-submodules --refmap= origin "refs/heads/$branch" </dev/null 2>/dev/null || return 1
+  fi
+  git -C "$repo" merge-base --is-ancestor "$sha" "$tip" 2>/dev/null || return 1
+  printf '%s\n' "$branch"
+}
+
 # 0 when <line> is not a ship done: to gate, when the task's meta records
 # forge=external and fm_dod_accept_external_review_done accepts it, when it
 # names the task's recorded PR whose head the forge holds, when it names a
@@ -1118,7 +1161,7 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit captured=''
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit note branch captured=''
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if [ "$mode" = local-only ] && [ -n "$meta" ]; then
     captured=$(cat "$meta") || return 1
@@ -1131,6 +1174,19 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
   if [ -n "$meta" ] && [ "$(fm_dod_meta_value "$meta" forge)" = external ]; then
     fm_dod_accept_external_review_done "$wt" "$project" "$line" "$meta"
     return
+  fi
+  if [ "$mode" = direct-push ]; then
+    note=$(status_line_note "$line")
+    sha=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || sha=
+    if [ -z "$wt" ] || [[ "$note" != "pushed to "*' as '"$sha" ]] || ! fm_pr_head_valid "$sha"; then
+      printf '%s\n' 'direct-push done must report pushed to <branch> as <full worktree HEAD>'
+      return 1
+    fi
+    if ! branch=$(fm_dod_direct_push_landed "$project" "$sha") || [ "$note" != "pushed to $branch as $sha" ]; then
+      printf '%s\n' 'direct-push done requires the reported head on the current origin default branch'
+      return 1
+    fi
+    return 0
   fi
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then

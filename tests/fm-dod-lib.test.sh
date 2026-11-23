@@ -21,6 +21,29 @@ write_merge_marker() {  # <state> <id> <provider> <host> <path> <number>
   chmod 600 "$1/$2.pr-poll-merge-notified"
 }
 
+test_direct_push_done_names_the_landed_head() {
+  local repo wt origin sha
+  repo="$TMP_ROOT/direct-push-repo"
+  wt="$TMP_ROOT/direct-push-wt"
+  fm_git_worktree "$repo" "$wt" fm/direct-push
+  origin="$repo.origin.git"
+  git -C "$repo" push -q origin HEAD:refs/heads/release/active || fail "could not seed a custom origin default"
+  git -C "$origin" symbolic-ref HEAD refs/heads/release/active || fail "could not set a custom origin default"
+  git -C "$wt" commit -q --allow-empty -m 'direct-push work'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" push -q origin HEAD:refs/heads/topic
+  if accept_done ship direct-push "$wt" "$repo" "done: pushed to topic as $sha" >/dev/null; then
+    fail "a direct-push done on a topic branch was accepted"
+  fi
+  git -C "$wt" push -q origin HEAD:refs/heads/release/active
+  if accept_done ship direct-push "$wt" "$repo" "done: pushed to release/active as ${sha:0:7}" >/dev/null; then
+    fail "a direct-push done with an abbreviated SHA was accepted"
+  fi
+  accept_done ship direct-push "$wt" "$repo" "done: pushed to release/active as $sha" >/dev/null \
+    || fail "a direct-push done naming the full current head on the default branch was refused"
+  pass "direct-push completion proves the exact reported worktree head on origin's default"
+}
+
 test_scout_done_is_not_gated() {
   local repo wt
   repo="$TMP_ROOT/scout-repo"
@@ -673,6 +696,7 @@ EOF
   pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
 }
 
+test_direct_push_done_names_the_landed_head
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated

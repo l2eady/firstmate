@@ -307,6 +307,9 @@ WATCH_HOME_EXISTED=0
 # shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 
+# shellcheck source=bin/fm-disk-lib.sh
+. "$SCRIPT_DIR/fm-disk-lib.sh"
+
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
@@ -4057,6 +4060,25 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
+# Keep the probe cadence and one warning per low-space episode across wakes.
+DISK_CHECK_INTERVAL=${FM_DISK_CHECK_INTERVAL:-300}
+case "$DISK_CHECK_INTERVAL" in ''|*[!0-9]*) DISK_CHECK_INTERVAL=300 ;; esac
+check_disk_space() {
+  local warning
+  [ "$(age_of "$STATE/.last-disk-check")" -ge "$DISK_CHECK_INTERVAL" ] || return 0
+  touch "$STATE/.last-disk-check"
+  warning=$(fm_disk_warning "$FM_HOME") || return 0
+  if [ -z "$warning" ]; then
+    rm -f -- "$STATE/.disk-low"
+    return 0
+  fi
+  [ ! -e "$STATE/.disk-low" ] || return 0
+  compgen -G "$STATE/*.meta" >/dev/null || return 0
+  fm_wake_append check disk "check: $warning" || exit 1
+  : > "$STATE/.disk-low"
+  wake "check: $warning"
+}
+
 while :; do
   PR_DEGRADED_WATCH_ENABLED=0
   [ ! -e "$CONFIG/pr-degraded-watch" ] || PR_DEGRADED_WATCH_ENABLED=1
@@ -4200,6 +4222,8 @@ while :; do
   else
     triage_log "inactive-outcome reconciliation unavailable"
   fi
+
+  check_disk_space
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.

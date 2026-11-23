@@ -1192,12 +1192,12 @@ Without it, every fresh ship or scout worktree on a project with an origin remot
 
 With it present, a fresh local-only ship, or a scout spawned without `--base-branch`, starts from the primary checkout's `<default>` when that branch strictly contains origin's tip.
 A local-only project lands work there through `bin/fm-merge-local.sh` and never pushes, so `origin/<default>` stays at the last push, and a fresh task would otherwise start behind work already landed and load the project's instruction files from that stale tree.
-A no-mistakes or direct-PR ship and any task with a named base branch still start from origin's tip, because that work is delivered against origin.
+A no-mistakes, direct-PR, or direct-push ship and any task with a named base branch still start from origin's tip, because that work is delivered against origin.
 When the primary checkout's `<default>` and origin's have diverged, the spawn prints a note and starts from origin's tip.
 A project without an origin remote is unaffected, and a relaunch never changes the base a task already has.
 
-`bin/fm-review-diff.sh` reads the same flag, so a local-only ship or a scout is reviewed against the branch it delivers to and its diff shows only its own work, while a no-mistakes or direct-PR ship stays anchored on `origin/<default>`.
-`bin/fm-promote.sh` reads it too, telling a scout promoted to no-mistakes or direct-PR on a project with an origin remote to return to origin's default branch rather than the primary checkout's.
+`bin/fm-review-diff.sh` reads the same flag, so a local-only ship or a scout is reviewed against the branch it delivers to and its diff shows only its own work, while a no-mistakes, direct-PR, or direct-push ship stays anchored on `origin/<default>`.
+`bin/fm-promote.sh` reads it too, telling a scout promoted to no-mistakes, direct-PR, or direct-push on a project with an origin remote to return to origin's default branch rather than the primary checkout's.
 
 The flag is per home and is not inherited by secondmate homes, which keep their own project clones and opt in separately.
 Only its presence is read, at each fresh spawn, review, and promotion.
@@ -1376,7 +1376,7 @@ Teardown of a leased home fails closed if `treehouse return` cannot release the 
 
 ### Project modes and backlog handoff
 
-Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
+Secondmate routes cover `no-mistakes`, `direct-PR`, and `direct-push` projects; `local-only` projects remain main-firstmate work.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 
 After creating a secondmate, move existing main-backlog queued items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it refuses In flight, Done, or non-secondmate homes, and its [script header](../bin/fm-backlog-handoff.sh) owns route-specific wake outcomes and retries.

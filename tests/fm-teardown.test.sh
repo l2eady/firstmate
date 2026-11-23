@@ -701,6 +701,27 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+test_direct_push_requires_origin_default() {
+  local case_dir
+  case_dir=$(make_case direct-push-origin-default)
+  write_meta "$case_dir" direct-push ship
+  wt_commit_file "$case_dir" feature.txt payload
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" push -q origin HEAD:refs/heads/topic
+  if run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+    fail "direct-push teardown accepted a pushed topic branch on origin or a fork"
+  fi
+  assert_grep "no proof that HEAD landed on origin's default branch" "$case_dir/stderr" "missing origin-default refusal"
+  assert_present "$case_dir/state/task-x1.meta" "refused teardown removed the task record"
+
+  git -C "$case_dir/wt" push -q origin HEAD:refs/heads/release/current
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/release/current
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "direct-push teardown refused work on the advertised default: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "successful teardown retained the task record"
+  pass "direct-push teardown requires the advertised origin default and accepts a custom default branch"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -6591,6 +6612,7 @@ test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
+test_direct_push_requires_origin_default
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note

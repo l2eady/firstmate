@@ -111,9 +111,9 @@
 #          The `code-root <file>` variant is a detect-only local check that runs
 #          even in a read-only session; detect_code_root_backlog_fork owns what
 #          it reports.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
-#          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
+#          secondmate_liveness_sweep, secondmate_handoff_resume, resource and test DB cleanup, x_mode_setup,
 #          fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
@@ -122,7 +122,7 @@
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes and receiver wakes,
 #          X-mode artifacts, project clones, or repair instructions.
-#          Unset/0 (the default) runs all six sweeps - this flag is purely
+#          Unset/0 (the default) runs all sweeps - this flag is purely
 #          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
@@ -217,6 +217,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-test-db-sweep-lib.sh
+. "$SCRIPT_DIR/fm-test-db-sweep-lib.sh"
+# shellcheck source=bin/fm-disk-lib.sh
+. "$SCRIPT_DIR/fm-disk-lib.sh"
 # shellcheck source=bin/fm-credential-source-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-credential-source-lib.sh"
 # Shared secondmate endpoint probe + guarded relaunch; the watcher's poll tick
@@ -1776,6 +1780,8 @@ fi
 local_phase && detect_local_config
 local_phase && [ -e "$CONFIG/record-hygiene" ] && record_hygiene_report
 
+local_phase && fm_disk_warning "$FM_HOME" || true
+
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # secondmate_sync consumes SECONDMATE_RESPAWNED_IDS from the liveness sweep, so
   # those two always run together in the same phase. Clone refresh does not
@@ -1813,6 +1819,14 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
       secondmate_handoff_resume
       fm_timing_record phase handoff-delivery "$__fm_timing_stamp"
     fi
+  fi
+  if local_phase; then
+    if ! "$SCRIPT_DIR/fm-resource-gc.sh"; then
+      echo "RESOURCE_SWEEP: some manifests require inspection before cleanup"
+    fi
+    for project in "$PROJECTS"/*; do
+      fm_test_db_sweep "$project"
+    done
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup

@@ -1,12 +1,16 @@
 ---
 name: ship-landing
-description: Load when a ship reports a PR or ready branch, when deciding or monitoring landing, and before task cleanup.
+description: Load when a ship reports a PR, direct push, or ready branch, when deciding or monitoring landing, and before task cleanup.
 user-invocable: false
 metadata:
   internal: true
 ---
 
 # Ship landing
+
+For a `direct-push` ship, read `done: pushed to <branch> as <sha>` (an optional status timestamp precedes the colon), confirm with `bin/fm-crew-state.sh <id>`, and run ordinary teardown.
+The named-head gate checks origin’s current default branch, and teardown rechecks the stopped worktree.
+Relay the landed branch and commit and skip Validate and PR ready.
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done [at=<epoch>]: PR <url> checks green` after CI is green, while `direct-PR` reports `done [at=<epoch>]: PR <url>` after opening the PR, each only for a non-draft PR; a lane that deliberately holds a draft declares a wait instead, and `bin/fm-pr-check.sh` refuses to arm merge monitoring on a draft.
 Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from that ready signal or the resolved checks-green `fm-crew-state.sh` line - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll, which also wakes the supervisor if the ready PR/MR later degrades (failing check, failed head pipeline, merge-train drop) so the worker can be steered to fix it.

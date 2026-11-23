@@ -93,7 +93,7 @@ EOF
 missing both flags||ship spawns require --mode
 missing --yolo|--mode no-mistakes|ship spawns require --yolo
 missing --mode|--yolo off|ship spawns require --mode
-unknown mode|--mode nope --yolo off|must be one of no-mistakes, direct-PR, local-only
+unknown mode|--mode nope --yolo off|must be one of no-mistakes, direct-PR, direct-push, local-only
 unknown yolo|--mode no-mistakes --yolo maybe|--yolo must be on or off
 conditional policy as a task mode|--mode no-mistakes-prod-only --yolo off|classify this task's surface
 ROWS

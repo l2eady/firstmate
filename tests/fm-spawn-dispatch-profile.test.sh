@@ -176,6 +176,19 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+test_direct_push_records_mode_and_yolo() {
+  local rec id=spawn-direct-push out
+  rec=$(make_spawn_case direct-push claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' '- project [direct-push +yolo] - test project' > "$HOME_DIR/data/projects.md"
+  printf '%s\n' 'Delivery contract: mode=direct-push' >> "$HOME_DIR/data/$id/brief.md"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode direct-push --yolo on) \
+    || fail "direct-push spawn refused: $out"
+  assert_grep 'mode=direct-push' "$HOME_DIR/state/$id.meta" "direct-push spawn lost the mode"
+  assert_grep 'yolo=on' "$HOME_DIR/state/$id.meta" "direct-push spawn lost yolo"
+  pass "spawn records the explicit direct-push posture"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -3020,6 +3033,7 @@ test_codex_permission_invalid_refuses_before_mutation
 test_codex_permission_does_not_change_other_harnesses
 test_launch_preserves_inherited_git_config
 test_worker_launch_delivers_role_scope
+test_direct_push_records_mode_and_yolo
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
 test_claude_secondmate_launch_brief_publishes_into_its_own_home

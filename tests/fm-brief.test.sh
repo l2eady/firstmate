@@ -194,6 +194,20 @@ EOF
 # against any *new* unescaped apostrophe or unbalanced quote later added to
 # one of these DOD blocks, since a broken heredoc corrupts or empties the
 # generated brief content, not just the script's own syntax.
+test_direct_push_contract() {
+  local home brief
+  home="$TMP_ROOT/direct-push"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-push-a1 project --mode direct-push >/dev/null \
+    || fail "direct-push brief did not scaffold"
+  brief="$home/data/brief-push-a1/brief.md"
+  assert_grep 'Delivery contract: mode=direct-push' "$brief" "missing direct-push delivery contract"
+  assert_grep 'pushed to {branch} as {sha}' "$brief" "missing direct-push status"
+  assert_grep 'git push origin HEAD:refs/heads/' "$brief" "missing fast-forward push refspec"
+  assert_no_regex 'no-mistakes doctor|gh-axi pr create' "$brief" "direct-push brief still prepares a pipeline or PR"
+  pass "direct-push brief records the mode, push command, and completion signal"
+}
+
 test_ship_modes_generate_clean_briefs() {
   local home id mode brief status
   home="$TMP_ROOT/ship-home"
@@ -375,7 +389,7 @@ test_ship_mode_is_required_and_closed_set() {
   done <<'ROWS'
 missing --mode||ship briefs require --mode
 empty --mode value|--mode|requires a value
-unknown mode value|--mode nope|must be one of no-mistakes, direct-PR, local-only
+unknown mode value|--mode nope|must be one of no-mistakes, direct-PR, direct-push, local-only
 conditional policy is not a task mode|--mode no-mistakes-prod-only|classify this task's surface
 ROWS
   pass "fm-brief.sh: ship --mode is required and closed-set validated"
@@ -1694,6 +1708,7 @@ test_crewmate_scaffolds_forbid_pool_administration() {
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
+test_direct_push_contract
 test_ship_modes_generate_clean_briefs
 test_forge_selection_renders_correct_cli
 test_forge_external_renders_the_review_rail

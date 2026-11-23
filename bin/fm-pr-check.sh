@@ -125,6 +125,7 @@ pr_check_scan() {
     fm_pr_task_id_valid "$id" || continue
     kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
     case "$kind" in secondmate|scout) continue ;; esac
+    [ "$(fm_dod_meta_value "$meta" mode)" != direct-push ] || continue
     url=$(pr_check_reported_url "$STATE/$id.status") || continue
     recorded=$(grep '^pr=' "$meta" | tail -1 | cut -d= -f2- || true)
     pr_check_pr_retired "$id" "$recorded" && continue
@@ -230,6 +231,12 @@ if [ "$KIND" = secondmate ]; then
   exit 1
 fi
 
+MODE=$(fm_dod_meta_value "$META" mode)
+if [ "$MODE" = direct-push ]; then
+  echo "error: $ID ships by direct-push, with no pull request to watch" >&2
+  exit 1
+fi
+
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
 # Finish only its identity-bound receipt before publishing a replacement poll.
@@ -326,7 +333,6 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
-MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
 # The gate is asked about the ready report this task's worker was told to give;
 # on a Gerrit change both publishing modes report the same published line.

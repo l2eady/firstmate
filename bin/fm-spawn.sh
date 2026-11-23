@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|direct-push|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -984,6 +984,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-herdr-identity-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-resource-lib.sh
+. "$SCRIPT_DIR/fm-resource-lib.sh"
 # shellcheck source=bin/fm-project-capacity-lib.sh
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
@@ -1283,7 +1285,7 @@ else
   # and record no delivery posture; secondmate spawns hardcode theirs.
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
-      echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+      echo "error: ship spawns require --mode <no-mistakes|direct-PR|direct-push|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
       exit 1
     }
     [ "$YOLO_SET" -eq 1 ] || {
@@ -1291,13 +1293,13 @@ else
       exit 1
     }
     case "$MODE" in
-    no-mistakes | direct-PR | local-only) ;;
+    no-mistakes | direct-PR | direct-push | local-only) ;;
     no-mistakes-prod-only)
       echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
       exit 1
       ;;
     *)
-      echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2
+      echo "error: --mode must be one of no-mistakes, direct-PR, direct-push, local-only (got '$MODE')" >&2
       exit 1
       ;;
     esac
@@ -4402,7 +4404,7 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
   case "$1" in
   no-mistakes) echo 3 ;;
   direct-PR) echo 2 ;;
-  local-only) echo 1 ;;
+  local-only|direct-push) echo 1 ;;
   *) echo 0 ;;
   esac
 }
@@ -4413,6 +4415,10 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
 # would launch a worker whose instructions and whose recorded task delivery
 # differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
+  if [ "$MODE" = direct-push ] && ! git -C "$PROJ_ABS" remote get-url origin >/dev/null 2>&1; then
+    echo "error: direct-push requires an origin remote for $PROJ_ABS" >&2
+    exit 1
+  fi
   PROJ_NAME=$(basename "$PROJ_ABS")
   # The parser's own refusal reaches the operator here rather than being
   # discarded: an entry it refuses (an unknown forge token, or a forge on
@@ -6266,17 +6272,42 @@ esac
 # can plant or swap a file in it. The staged launch command lives in a sibling
 # directory namespaced by home identity, not in this shared per-id root.
 TASK_TMP="/tmp/fm-$ID"
-if (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
-  [ "$HARNESS" != polytoken ] || SPAWN_TASK_TMP_CREATED=1
-else
-  if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || [ ! -O "$TASK_TMP" ] ||
-    [ -n "$(find "$TASK_TMP" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
-    ! chmod 700 "$TASK_TMP"; then
-    echo "error: task temp root $TASK_TMP already exists and is not a private directory owned by this user; refusing to stage the launch command there; inspect and remove it, then retry" >&2
-    exit 1
+RESOURCE_ENV=
+RESOURCE_MANIFEST="$STATE/$ID.resources"
+if [ "$KIND" != secondmate ] \
+  && { [ -e "$RESOURCE_MANIFEST" ] || [ -L "$RESOURCE_MANIFEST" ] \
+    || command -v docker >/dev/null 2>&1 || command -v chrome-devtools-axi >/dev/null 2>&1; }; then
+  if [ -e "$TASK_TMP" ] || [ -L "$TASK_TMP" ]; then
+    resource_owner=$(fm_resource_owner_for "$FM_HOME" "$FM_ROOT" "$ID")
+    if ! fm_resource_validate_task_tmp "$ID" "$TASK_TMP" "$resource_owner" "$FM_HOME" "$FM_ROOT" >/dev/null 2>&1; then
+      TASK_TMP="$TASK_TMP-$(fm_resource_home_tag_for "$FM_HOME" "$FM_ROOT")"
+    fi
   fi
+  # Reuse the previous root on relaunch, including a previously needed suffix.
+  if [ -f "$RESOURCE_MANIFEST" ] && [ ! -L "$RESOURCE_MANIFEST" ]; then
+    TASK_TMP=$(fm_resource_manifest_get "$RESOURCE_MANIFEST" tasktmp)
+  fi
+  browser_owned=1
+  if [ -n "${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}${CHROME_DEVTOOLS_AXI_USER_DATA_DIR:-}${CHROME_DEVTOOLS_AXI_SESSION:-}" ]; then
+    browser_owned=0
+  fi
+  case "${CHROME_DEVTOOLS_AXI_AUTO_CONNECT:-0}" in 1|true) browser_owned=0 ;; esac
+  RESOURCE_MANIFEST=$(fm_resource_prepare_task "$ID" "$FM_HOME" "$FM_ROOT" "$STATE" "$TASK_TMP" \
+    "$BACKEND" "$T" "$browser_owned") || exit 1
+  RESOURCE_ENV=$(fm_resource_task_env_line "$RESOURCE_MANIFEST") || exit 1
+else
+  if (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
+    [ "$HARNESS" != polytoken ] || SPAWN_TASK_TMP_CREATED=1
+  else
+    if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || [ ! -O "$TASK_TMP" ] ||
+      [ -n "$(find "$TASK_TMP" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
+      ! chmod 700 "$TASK_TMP"; then
+      echo "error: task temp root $TASK_TMP already exists and is not a private directory owned by this user; refusing to stage the launch command there; inspect and remove it, then retry" >&2
+      exit 1
+    fi
+  fi
+  mkdir -p "$TASK_TMP/gotmp"
 fi
-mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -7888,6 +7919,12 @@ if [ "$BACKEND" = t3code ]; then
   # record exists, the same delivered-implies-recorded invariant the pane path
   # keeps by unsetting it when the record fails.
   T3CODE_ENV=("GOTMPDIR=$TASK_TMP/gotmp" COMPACT_ADVISER_DISABLE=1 "FM_TASK_INBOX=$STATE_REAL/$ID.inbox")
+  if [ -n "$RESOURCE_ENV" ]; then
+    T3CODE_ENV+=("PATH=$TASK_TMP/bin:$PATH" "FM_TASK_RESOURCE_MANIFEST=$RESOURCE_MANIFEST" \
+      "COMPOSE_PROJECT_NAME=$(fm_resource_manifest_get "$RESOURCE_MANIFEST" docker_project)" \
+      "FM_RESOURCE_REAL_DOCKER=$(fm_resource_manifest_get "$RESOURCE_MANIFEST" docker_real)" \
+      "FM_RESOURCE_REAL_CHROME=$(fm_resource_manifest_get "$RESOURCE_MANIFEST" chrome_real)")
+  fi
   if [ "$GIT_HOOKS_INSTALLED" = 1 ]; then
     T3CODE_ENV+=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath "GIT_CONFIG_VALUE_0=$GIT_HOOKS_DIR")
   fi
@@ -7955,6 +7992,7 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 fi
+[ -z "$RESOURCE_ENV" ] || LAUNCH="$RESOURCE_ENV$LAUNCH"
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
   # A configured Orca source replaces destination expansion of allowlisted

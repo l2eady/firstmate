@@ -439,6 +439,10 @@ unset _teardown_source
 # The bounded remote-ref refresh is shared with the done-claim gate.
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-resource-lib.sh
+. "$SCRIPT_DIR/fm-resource-lib.sh"
+# shellcheck source=bin/fm-test-db-sweep-lib.sh
+. "$SCRIPT_DIR/fm-test-db-sweep-lib.sh"
 # Archive paths live only in teardown; presentation/wake readers stay unaware.
 teardown_archive_directory() {  # <directory>
   if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
@@ -1847,6 +1851,7 @@ work_is_landed() {
 # keeps its report as the held deliverable, while a force-closed scout is
 # recorded as discarded with no report. A local-only ship lands on local main,
 # and every other ship carries the PR recorded on its own record.
+DIRECT_PUSH_BRANCH=
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
@@ -1868,6 +1873,12 @@ backlog_done_args() {
     *)
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
+      elif [ "$MODE" = direct-push ]; then
+        if [ "$FORCE" = --force ]; then
+          BACKLOG_DONE_ARGS=(--note discarded)
+        elif [ -n "$DIRECT_PUSH_BRANCH" ]; then
+          BACKLOG_DONE_ARGS=(--note "pushed to $DIRECT_PUSH_BRANCH")
+        fi
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
       fi
@@ -2208,6 +2219,27 @@ validate_worktree_teardown_safety() {
   esac
 
   read_worktree_dirt || return
+
+  if [ "$MODE" = direct-push ]; then
+    if [ -n "$dirty" ]; then
+      echo "REFUSED: direct-push worktree $WT has uncommitted changes." >&2
+      report_worktree_dirt "$dirty"
+      return 1
+    fi
+    local head head_after
+    head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+    if ! DIRECT_PUSH_BRANCH=$(fm_dod_direct_push_landed "$PROJ" "$head"); then
+      echo "REFUSED: direct-push worktree $WT has no proof that HEAD landed on origin's default branch." >&2
+      return 1
+    fi
+    read_worktree_dirt || return
+    head_after=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+    if [ -n "$dirty" ] || [ "$head" != "$head_after" ]; then
+      echo "REFUSED: direct-push worktree $WT changed during the landing check." >&2
+      return 1
+    fi
+    return 0
+  fi
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -3865,6 +3897,33 @@ if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
 fi
 
+RESOURCE_MANIFEST="$STATE/$ID.resources"
+if [ -e "$RESOURCE_MANIFEST" ] || [ -L "$RESOURCE_MANIFEST" ]; then
+  if ! fm_resource_validate_manifest "$ID" "$STATE" "$RESOURCE_MANIFEST" 1 \
+    || [ "$(fm_resource_manifest_get "$RESOURCE_MANIFEST" home)" != "$(fm_resource_real_dir "$FM_HOME")" ] \
+    || [ "$(fm_resource_manifest_get "$RESOURCE_MANIFEST" root)" != "$(fm_resource_real_dir "$FM_ROOT")" ] \
+    || [ "$(fm_resource_manifest_get "$RESOURCE_MANIFEST" current_backend)" != "$BACKEND" ] \
+    || [ "$(fm_resource_manifest_get "$RESOURCE_MANIFEST" current_endpoint)" != "$T" ] \
+    || [ "$(fm_resource_manifest_get "$RESOURCE_MANIFEST" tasktmp)" != "$TASK_TMP" ]; then
+    echo "REFUSED: resource manifest no longer matches the task record: $RESOURCE_MANIFEST" >&2
+    exit 1
+  fi
+  resource_owner=$(fm_resource_manifest_get "$RESOURCE_MANIFEST" owner)
+  fm_resource_validate_task_tmp "$ID" "$TASK_TMP" "$resource_owner" "$FM_HOME" "$FM_ROOT" >/dev/null || exit 1
+fi
+
+LEGACY_RESOURCE_ENDPOINT_WAS_LIVE=0
+if [ ! -e "$RESOURCE_MANIFEST" ] && [ "$TASK_TMP" = "/tmp/fm-$ID" ] \
+  && [ -d "$TASK_TMP/gotmp" ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
+  case "$BACKEND" in
+    tmux|herdr)
+      if fm_backend_target_exists "$BACKEND" "$T" "fm-$ID" >/dev/null 2>&1; then
+        LEGACY_RESOURCE_ENDPOINT_WAS_LIVE=1
+      fi
+      ;;
+  esac
+fi
+
 # A Herdr pane's top-level shell lives in its leased copy, so the reap and the
 # Treehouse return below would end it and Herdr would remove the pane outside
 # the locked, focus-preserving close. Herdr therefore closes its exact pane here,
@@ -3967,6 +4026,10 @@ fi
 # returning it on either backend path.
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   validate_worktree_teardown_safety || exit 1
+fi
+
+if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+  fm_test_db_sweep "$WT"
 fi
 
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
@@ -4178,9 +4241,22 @@ fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
-# Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# Retire the resources recorded for this task after its runtime close.
+if [ -e "$RESOURCE_MANIFEST" ] || [ -L "$RESOURCE_MANIFEST" ]; then
+  if ! fm_resource_cleanup_task "$ID" "$FM_HOME" "$FM_ROOT" "$STATE" "$TASK_TMP" "$RESOURCE_MANIFEST"; then
+    echo "error: task resources still need cleanup; ownership is retained in $RESOURCE_MANIFEST" >&2
+    exit 1
+  fi
+elif [ "$LEGACY_RESOURCE_ENDPOINT_WAS_LIVE" = 1 ]; then
+  # Pre-manifest tasktmp is only eligible at the canonical legacy location.
+  # Leave any unfamiliar path, tag, or symlink for manual reconciliation.
+  resource_owner=$(fm_resource_owner_for "$FM_HOME" "$FM_ROOT" "$ID")
+  if [ "$BACKEND" = tmux ] && fm_backend_target_exists tmux "$T" "fm-$ID" >/dev/null 2>&1; then
+    echo "resource: leaving legacy task temp root while $T remains present" >&2
+  elif ! fm_resource_remove_legacy_task_tmp "$ID" "$TASK_TMP" "$resource_owner" "$FM_HOME" "$FM_ROOT"; then
+    echo "resource: leaving unproven legacy task temp root $TASK_TMP" >&2
+  fi
+fi
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
 teardown_launch_home_token() {

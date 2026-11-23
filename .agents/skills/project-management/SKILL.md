@@ -39,6 +39,7 @@ Choose that posture when adding or creating the project:
 
 - `no-mistakes` runs the full validation pipeline before a PR.
 - `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
+- `direct-push` lets the worker fast-forward origin’s default branch without PR review; use it for a project whose captain has chosen this delivery mode.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
 - `no-mistakes-prod-only` is a conditional policy rather than one flat mode: genuinely internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`.
 
@@ -67,7 +68,7 @@ The optional `pr=manual` token marks a `no-mistakes` project whose PR title and 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
-A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
+A `direct-PR` or `direct-push` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
 Confirm the matching CLI is authenticated for a non-GitHub host: `glab auth login` for a GitLab project, whose merge watch and merge use glab, or a `tea login add` for a `forge=forgejo` project, whose merge watch, merge, and generated ship brief use tea.
 
