@@ -897,6 +897,7 @@ tests/fm-remote-secondmate-parent-binding.test.sh 42294
 tests/fm-remote-secondmate-relaunch.test.sh 879
 tests/fm-remote-secondmate-trace-context.test.sh 74870
 tests/fm-remote-transport-lanes.test.sh 66089
+tests/fm-resource.test.sh 33000
 tests/fm-rovo-harness.test.sh 15691
 tests/fm-rovo-signals-live-e2e.test.sh 52
 tests/fm-secondmate-harness.test.sh 188187
@@ -1096,8 +1097,8 @@ select_proven_isolated() {
   done < <(list_proven_isolated)
 }
 
-select_lane() {
-  local want=$1 s shard idx found=0
+select_lane() {  # <lane> [<serial-assignment-snapshot>]
+  local want=$1 assignments=${2:-} s shard idx found=0
   case "$want" in
     portable-parallel-1)
       while IFS= read -r s; do
@@ -1129,7 +1130,13 @@ select_lane() {
           add_script "$s"
           found=1
         fi
-      done < <(portable_serial_assignments)
+      done < <(
+        if [ -n "$assignments" ]; then
+          cat "$assignments"
+        else
+          portable_serial_assignments
+        fi
+      )
       ;;
     real-herdr-gated)
       select_family real-herdr-gated
@@ -1177,11 +1184,13 @@ run_coverage_guard() {
   SCRIPTS=()
   select_lane portable-serial
   printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/serial"
+  # Use one inventory snapshot for all shards of this coverage check.
+  portable_serial_assignments >"$tmp/serial_assignments"
   : >"$tmp/serial_shards_raw"
   shard=1
   while [ "$shard" -le "$PORTABLE_SERIAL_SHARDS" ]; do
     SCRIPTS=()
-    select_lane "portable-serial-${shard}of${PORTABLE_SERIAL_SHARDS}"
+    select_lane "portable-serial-${shard}of${PORTABLE_SERIAL_SHARDS}" "$tmp/serial_assignments"
     if [ "${#SCRIPTS[@]}" -eq 0 ]; then
       log "coverage guard: portable serial shard $shard of $PORTABLE_SERIAL_SHARDS is empty"
       SCRIPTS=("${saved_scripts[@]+"${saved_scripts[@]}"}")
