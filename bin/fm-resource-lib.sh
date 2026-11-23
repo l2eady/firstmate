@@ -766,6 +766,8 @@ fm_resource_cleanup_task() {  # <id> <home> <root> <state> <tasktmp> [<manifest>
   (
     real_docker=$(fm_resource_real_tool docker "$_FM_RESOURCE_LIB_DIR/fm-resource-docker.sh") || real_docker=
     if [ -n "$real_docker" ]; then
+      # The cleanup helpers below invoke this wrapper indirectly.
+      # shellcheck disable=SC2329
       docker() { "$real_docker" "$@"; }
     elif [ "$docker_used" = 1 ]; then
       echo "error: Docker is required to clean up $owner" >&2
