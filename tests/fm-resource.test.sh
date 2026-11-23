@@ -278,6 +278,7 @@ test_labels_and_teardown_cleanup() {
   [ ! -e "$tasktmp" ] || fail "tagged task temp root survived cleanup"
   [ ! -e "$manifest" ] || fail "resource manifest survived cleanup"
   [ -e "$DOCKER_STATE/removed" ] || fail "tagged Docker resource was not removed"
+  grep -Eq '^rm -f -v ' "$DOCKER_STATE/log" || fail "container cleanup did not request anonymous volume removal"
   grep -qxF 'stop' "$CHROME_LOG" || fail "tagged Chrome session was not stopped"
   pass "tagged Docker, Chrome, and profile resources are cleaned by owner"
 }

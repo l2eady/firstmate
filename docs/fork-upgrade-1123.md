@@ -140,4 +140,36 @@ Keep workspace cleanup scoped to the exact task and never stop the default Herdr
 
 ## Validation
 
-The baseline and candidate evidence uses the commands recorded in this section.
+Runs on 2026-11-23 used isolated Git copies on arm64 macOS 26.5.2 with Bash 5.3.9, Apple Git 2.50.1, jq 1.8.1, and the pinned lint tools.
+Actionlint 1.7.12 was installed only in the task's validation directory.
+The local runner used isolated Git configuration and omitted the real Herdr and HC families from the broad comparison.
+The Herdr task's named-lab contract takes precedence over upstream's tests that create and operate their own sessions.
+
+| Command or scenario | Pristine `427056c4` | Upgrade |
+| --- | --- | --- |
+| `bin/fm-test-run.sh --check-coverage` | Passed: 340 scripts, 297 portable serial, 16 real Herdr. | Passed: 341 scripts, 298 portable serial, 16 real Herdr. The largest modeled serial shard is 1,198,710 ms within the 1,200,000 ms budget. |
+| `bin/fm-test-run.sh --jobs 1 tests/fm-project-mode.test.sh tests/fm-dod-lib.test.sh` | Both suites passed. | Both suites passed. The new cases resolved the two registry lines and required a full commit ID on origin's advertised default. |
+| Direct-push brief and spawn cases in `fm-brief.test.sh` and `fm-spawn-dispatch-profile.test.sh` | The new assertions failed before implementation. | The direct-push brief rendered and the fake-pane spawn recorded `mode=direct-push` and `yolo=on`. |
+| `tests/fm-resource.test.sh` | New fork coverage. | All 11 scenarios passed, including exact Docker labels, anonymous-volume removal, browser ownership, symlink refusal, a scoped dead-endpoint sweep, and the bootstrap project hook. |
+| Targeted cases from `tests/fm-teardown.test.sh` | Existing missing-adapter preflight behavior. | Passed the default-branch proof and project hook cases plus the existing missing-adapter preflight case. |
+| `bin/fm-lint.sh --fast bin/fm-spawn.sh bin/fm-teardown.sh` | Passed. | Passed in the targeted source-aware run, which also included the resource library and collector. |
+| Workflow lint and stock Bash syntax | Existing workflows unchanged. | `bin/fm-lint-workflows.sh` validated all three files. Stock Bash parsed every changed shell file. |
+| Guarded Herdr lab | Runtime probe on the same installed binary. | Herdr 0.8.0 / protocol 19, exact pane close followed by structured `pane_not_found`, guarded teardown, and the default-session tripwire all passed. |
+
+The broad local command on each revision was `bin/fm-test-run.sh --all --exclude-family real-herdr-gated --exclude-family hc --per-script-timeout-secs 600 --json <timing-file>`.
+Both broad runs and both unpartitioned `CI=true bin/fm-lint.sh` runs were started.
+The broad runs did not provide complete comparable verdicts, and the full extended lint runs did not supply a final verdict.
+The focused verification and named lab do not constitute a complete upstream CI run.
+
+The local comparisons exposed these baseline issues.
+
+- `fm-afk-inject-e2e.test.sh` misclassified the injection digest on both revisions.
+- `fm-afk-return.test.sh` failed the catch-up retention assertion after evidence publication failed on both revisions.
+- `fm-brief.test.sh` and `fm-task-delivery.test.sh` failed their existing metacharacter branch-prefix fixtures on both revisions.
+- `fm-spawn-dispatch-profile.test.sh` reached the same 600-second local bound on both revisions. The added direct-push case passed in its focused run.
+- The pristine broad run reached an existing T3 Code policy-table assertion failure. The candidate broad run had yet to reach that test.
+- The initial isolated clone omitted `origin/main`, which the existing backend baseline test requires. That fixture ref was subsequently populated from pristine upstream in both validation clones.
+
+The coverage command reads one portable inventory and packs it once for comparison, avoiding a partial shard read on the local host.
+Its additional resource suite uses a 33-second packing hint from the observed local runs.
+Raw logs were kept under `data/upgrade-validation/` inside the disposable build checkout.
