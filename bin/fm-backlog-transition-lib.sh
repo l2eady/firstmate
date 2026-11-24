@@ -46,6 +46,7 @@
 # publishes or acts on a close replay would reject. The validator pins the data
 # path to this home's configured root before any recovery mutation, then re-runs
 # exactly that close.
+# The marker encodes the fixed spaces in local-main and direct-push notes as %20.
 # `tasks-axi done` on an already-closed task backfills links
 # without moving the close date, so replay is idempotent. Spawn needs no marker:
 # it publishes the meta first, so a crash
@@ -983,8 +984,17 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     2)
       case "${args[0]}" in
         --note)
-          [ "${args[1]}" = "local%20main" ] \
-            || [ "${args[1]}" = "discarded" ]
+          case "${args[1]}" in
+            local%20main|discarded) true ;;
+            pushed%20to%20*)
+              arg_value=${args[1]#pushed%20to%20}
+              case "$arg_value" in
+                ''|-*|*[!0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._/-]*) false ;;
+                *) git check-ref-format "refs/heads/$arg_value" >/dev/null 2>&1 ;;
+              esac
+              ;;
+            *) false ;;
+          esac
           ;;
         --pr)
           arg_value=${args[1]}
@@ -1083,11 +1093,13 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     shift
   fi
   for arg in "$@"; do
-    if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
-      serialized_args+=("local%20main")
-    else
-      serialized_args+=("$arg")
+    if [ "$previous_arg" = --note ]; then
+      case "$arg" in
+        'local main') arg=local%20main ;;
+        'pushed to '*) arg="pushed%20to%20${arg#pushed to }" ;;
+      esac
     fi
+    serialized_args+=("$arg")
     previous_arg=$arg
   done
   {
@@ -1159,8 +1171,11 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
-  if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = "local%20main" ]; then
-    args[1]="local main"
+  if [ "${args[0]-}" = --note ]; then
+    case "${args[1]}" in
+      local%20main) args[1]="local main" ;;
+      pushed%20to%20*) args[1]="pushed to ${args[1]#pushed%20to%20}" ;;
+    esac
   fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then

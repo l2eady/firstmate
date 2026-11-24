@@ -26,6 +26,7 @@ These independent registry examples resolve to `direct-push on` and `direct-push
 A local branch or a remote topic branch cannot prove completion.
 The worker uses the full commit ID in `done: pushed to <branch> as <sha>`.
 The task's `+yolo` value is still carried in metadata.
+Teardown records the backlog close as `--note "pushed to <branch>"`, preserving the same note when startup replays a pending close.
 
 ## Dropped or superseded
 
