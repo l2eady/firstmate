@@ -730,6 +730,7 @@ test_direct_push_requires_origin_default() {
   local case_dir
   case_dir=$(make_case direct-push-origin-default)
   write_meta "$case_dir" direct-push ship
+  seed_backlog_in_flight "$case_dir"
   wt_commit_file "$case_dir" feature.txt payload
   add_fork_with_pushed_branch "$case_dir"
   git -C "$case_dir/wt" push -q origin HEAD:refs/heads/topic
@@ -744,7 +745,14 @@ test_direct_push_requires_origin_default() {
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "direct-push teardown refused work on the advertised default: $(cat "$case_dir/stderr")"
   assert_absent "$case_dir/state/task-x1.meta" "successful teardown retained the task record"
-  pass "direct-push teardown requires the advertised origin default and accepts a custom default branch"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "direct-push teardown left its backlog item open"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -Fxq '  body: pushed to release/current' \
+    || fail "direct-push teardown did not record the default branch in the backlog"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "direct-push teardown left its pending-close record behind"
+  pass "direct-push teardown requires the advertised origin default and closes the backlog with its branch"
 }
 
 test_local_only_fork_remote_allows() {

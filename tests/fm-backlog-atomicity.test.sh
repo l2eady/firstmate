@@ -2106,6 +2106,28 @@ test_recovery_replays_a_discarded_scout_close_as_discarded() {
   pass "session start replays a recorded scout discard as discarded"
 }
 
+test_recovery_replays_a_direct_push_close() {
+  local case_dir home id=atomic-heal-direct-push
+  case_dir=$(make_home heal-direct-push)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship direct-push "spawn_gen=spawn-direct-push"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-direct-push\narg=--note\narg=pushed%%20to%%20release/v1.2_rc-3\n' \
+    "$id" "$home/data" > "$home/state/$id.backlog-close"
+
+  run_bootstrap "$case_dir" > "$case_dir/bootstrap.out" \
+    || fail "recovery failed to replay a direct-push close: $(cat "$case_dir/bootstrap.out")"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "recovery left the direct-push item open: $(cat "$case_dir/bootstrap.out")"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -Fxq '  body: pushed to release/v1.2_rc-3' \
+    || fail "the replayed direct-push close did not record the decoded note"
+  assert_absent "$home/state/$id.backlog-close" "recovery retained the direct-push close marker"
+  assert_absent "$home/state/$id.meta" "recovery retained the interrupted task record"
+  pass "session start replays a recorded direct-push close with the decoded branch note"
+}
+
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note() {
   local case_dir id out real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
   id=atomic-heal-gerrit-b9
@@ -2499,6 +2521,33 @@ test_recovery_rejects_invalid_close_arguments() {
   [ "$(row_state "$case_dir" "$id")" = in_flight ] \
     || fail "invalid close arguments changed the backlog row: $out"
   pass "recovery rejects close-marker arguments outside its protocol"
+}
+
+test_recovery_rejects_unsafe_direct_push_branches() {
+  local case_dir home branch id n=0 out
+  local branches=('' '-main' 'release..current' 'release current' $'release\tcurrent'
+    'release%20current' 'release//current' 'release/current.lock')
+  case_dir=$(make_home unsafe-direct-push)
+  home=$(home_of "$case_dir")
+  for branch in "${branches[@]}"; do
+    n=$((n + 1))
+    id=atomic-direct-push-invalid-$n
+    add_item "$case_dir" "$id"
+    start_item "$case_dir" "$id"
+    write_task_meta "$case_dir" "$id" ship direct-push "spawn_gen=spawn-direct-push"
+    printf 'id=%s\ndata=%s\nspawn_gen=spawn-direct-push\narg=--note\narg=pushed%%20to%%20%s\n' \
+      "$id" "$home/data" "$branch" > "$home/state/$id.backlog-close"
+  done
+
+  out=$(run_bootstrap "$case_dir")
+  for ((n=1; n<=${#branches[@]}; n++)); do
+    id=atomic-direct-push-invalid-$n
+    assert_present "$home/state/$id.backlog-close" "recovery consumed the unsafe close for $id"
+    assert_present "$home/state/$id.meta" "the unsafe close for $id removed its task record"
+    [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+      || fail "the unsafe close for $id changed its backlog row: $out"
+  done
+  pass "session start refuses unsafe branch names in direct-push close markers"
 }
 
 test_recovery_rejects_a_symlinked_close_marker() {
@@ -3173,6 +3222,7 @@ test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_replays_a_discarded_scout_close_as_discarded
+test_recovery_replays_a_direct_push_close
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
@@ -3189,6 +3239,7 @@ test_recovery_rejects_raw_control_bytes
 test_recovery_rejects_malformed_pr_urls
 test_failed_close_replay_is_not_started_as_live_work
 test_recovery_rejects_invalid_close_arguments
+test_recovery_rejects_unsafe_direct_push_branches
 test_recovery_rejects_a_symlinked_close_marker
 test_recovery_drops_a_close_for_a_newer_meta_incarnation
 test_recovery_rejects_a_legacy_close_without_an_incarnation
